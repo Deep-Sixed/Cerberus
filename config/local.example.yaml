@@ -1,0 +1,21 @@
+# No-secret local development profile. Point this at a local OpenAI-compatible
+# runtime such as llama.cpp, LM Studio, or Ollama's compatibility endpoint.
+server:
+  host: 127.0.0.1
+  port: 4111
+
+providers:
+  local:
+    protocol: openai_chat
+    base_url: http://127.0.0.1:8080/v1
+    model: local-model
+    cooldown_seconds: 30
+
+pools:
+  default:
+    strategy: first
+    providers: [local]
+
+routing_rules:
+  - match: { default: true }
+    pool: default

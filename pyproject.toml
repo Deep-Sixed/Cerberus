@@ -1,0 +1,37 @@
+[project]
+name = "metarouter"
+version = "0.1.0"
+description = "Portable policy-driven LLM router"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+license = { file = "LICENSE" }
+authors = [{ name = "Deep-Sixed" }]
+dependencies = [
+  "fastapi>=0.135,<1",
+  "httpx>=0.28,<1",
+  "pydantic>=2.12,<3",
+  "PyYAML>=6.0,<7",
+  "uvicorn[standard]>=0.41,<1",
+]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+metarouter = "metarouter.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=9,<10",
+  "pytest-asyncio>=1,<2",
+  "ruff>=0.15,<1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"

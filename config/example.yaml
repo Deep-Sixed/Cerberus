@@ -1,0 +1,31 @@
+server:
+  host: 127.0.0.1
+  port: 4101
+
+providers:
+  openrouter_free:
+    protocol: openai_chat
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    model: openrouter/free
+    cooldown_seconds: 300
+  local_llama:
+    protocol: openai_chat
+    base_url: http://127.0.0.1:8080/v1
+    model: qwen3-coder
+    cooldown_seconds: 30
+
+pools:
+  coding:
+    strategy: round_robin
+    providers: [openrouter_free, local_llama]
+  default:
+    strategy: first
+    providers: [openrouter_free]
+
+routing_rules:
+  - match: { request_type: coding }
+    pool: coding
+    fallback_pool: default
+  - match: { default: true }
+    pool: default
