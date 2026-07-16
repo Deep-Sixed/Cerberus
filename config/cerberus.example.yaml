@@ -1,0 +1,62 @@
+# Cerberus example configuration — schema reference for Session 1 (SPEC.md caps 1-3, 6).
+# Secrets are env-var NAMES populated by the file-secrets bridge; never values.
+metadata:
+  version: cerberus-2026-07-16.1
+
+server:
+  host: 127.0.0.1
+  port: 4000
+
+providers:
+  openrouter:
+    protocol: openai
+    base_url: https://openrouter.ai/api/v1
+    credentials:
+      primary: { api_key_env: OPENROUTER_API_KEY }
+    models:
+      openrouter/free: { cost_tier: free, capabilities: [chat, tools] }
+      anthropic/claude-sonnet: { cost_tier: paid, capabilities: [chat, tools, coding] }
+
+  google:
+    protocol: openai
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    credentials:
+      free-1: { api_key_env: GEMINI_KEY_1 }
+    models:
+      gemini-flash: { cost_tier: free, capabilities: [chat, tools] }
+    quota_cooldown_seconds: 14400   # daily free-tier quota
+    transport_cooldown_seconds: 30  # network blips never brick a provider for hours
+
+aliases:
+  cerberus/free:
+    mode: free                      # free-mode: paid candidates are a validation error
+    candidates:
+      - { provider: google, credential: free-1, model: gemini-flash }
+      - { provider: openrouter, credential: primary, model: openrouter/free }
+
+  cerberus/dispatch-ledger:
+    mode: dispatch
+    allow_paid_fallback: true
+    candidates:
+      - { provider: openrouter, credential: primary, model: anthropic/claude-sonnet }
+      - { provider: openrouter, credential: primary, model: openrouter/free }
+
+  cerberus/fusion-code:
+    mode: fusion
+    candidates:                     # the panel
+      - { provider: google, credential: free-1, model: gemini-flash }
+      - { provider: openrouter, credential: primary, model: openrouter/free }
+    fusion:
+      max_panel_members: 5
+      timeout_seconds: 180
+      allow_paid_panel: false
+      judge: { provider: openrouter, credential: primary, model: openrouter/free }
+      on_partial_failure: judge_with_partial
+      require_human_review: true
+
+identities:
+  recon:
+    credential_env: CB_KEY_RECON    # holds a cb- client key
+    allowed_modes: [free]           # deny-by-default: absence means denied
+    allowed_aliases: [cerberus/free]
+    default_alias: cerberus/free
