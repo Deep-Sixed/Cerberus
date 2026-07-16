@@ -1,4 +1,4 @@
-"""Portable MetaRouter configuration loaded from YAML and environment names."""
+"""Portable Cerberus configuration loaded from YAML and environment names."""
 
 from pathlib import Path
 import os
@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 import yaml
 
-DEFAULT_CONFIG_PATH = Path("/etc/metarouter/config.yaml")
+DEFAULT_CONFIG_PATH = Path("/etc/cerberus/config.yaml")
 MAX_ROUTING_LABEL_LENGTH = 100
 
 
@@ -108,7 +108,7 @@ class RouterConfig(BaseModel):
 
 
 def load_config(path: str | Path | None = None, *, validate_credentials: bool = True) -> RouterConfig:
-    config_path = Path(path or os.environ.get("METAROUTER_CONFIG", DEFAULT_CONFIG_PATH))
+    config_path = Path(path or os.environ.get("CERBERUS_CONFIG", DEFAULT_CONFIG_PATH))
     with config_path.open(encoding="utf-8") as handle:
         raw = yaml.safe_load(handle)
     config = RouterConfig.model_validate(raw)

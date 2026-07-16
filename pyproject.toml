@@ -1,7 +1,7 @@
 [project]
-name = "metarouter"
+name = "cerberus"
 version = "0.1.0"
-description = "Portable policy-driven LLM router"
+description = "Cerberus - unified policy routing service (Dispatch, Free Router, Fusion)"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
 license = { file = "LICENSE" }
@@ -19,7 +19,7 @@ requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-metarouter = "metarouter.cli:main"
+cerberus = "cerberus.cli:main"
 
 [dependency-groups]
 dev = [

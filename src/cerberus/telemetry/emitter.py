@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 import httpx
 
-from .config import TelemetryConfig
+from ..config import TelemetryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +112,7 @@ class TelemetryEmitter:
         if self._client is None or self._worker is not None:
             return
         self._queue = asyncio.Queue(maxsize=self._queue_capacity)
-        self._worker = asyncio.create_task(self._drain(), name="metarouter-telemetry")
+        self._worker = asyncio.create_task(self._drain(), name="cerberus-telemetry")
 
     def emit(self, event: RoutingEvent) -> None:
         if self._client is None or self._queue is None:

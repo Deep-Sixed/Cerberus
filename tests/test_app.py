@@ -1,8 +1,8 @@
 import httpx
 import pytest
 
-from metarouter.app import create_app
-from metarouter.config import RouterConfig
+from cerberus.app import create_app
+from cerberus.config import RouterConfig
 
 
 @pytest.fixture
@@ -54,8 +54,8 @@ async def test_routes_and_redacts_credentials(config: RouterConfig) -> None:
             )
 
     assert response.status_code == 200
-    assert response.json()["metarouter"]["provider"] == "primary"
-    assert response.json()["metarouter"]["model"] == "primary-model"
+    assert response.json()["cerberus"]["provider"] == "primary"
+    assert response.json()["cerberus"]["model"] == "primary-model"
     assert "primary-secret" not in response.text
     assert seen[0].url == "https://primary.example/v1/chat/completions"
     upstream_body = httpx.Response(200, content=seen[0].content).json()
@@ -91,8 +91,8 @@ async def test_rate_limit_fails_over_to_next_provider(config: RouterConfig) -> N
             health = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json()["metarouter"]["provider"] == "secondary"
-    assert response.json()["metarouter"]["attempts"] == 2
+    assert response.json()["cerberus"]["provider"] == "secondary"
+    assert response.json()["cerberus"]["attempts"] == 2
     assert health.json()["cooldowns"]["primary"] > 0
 
 
@@ -109,7 +109,7 @@ async def test_streaming_response_is_proxied(config: RouterConfig) -> None:
             response = await client.post("/v1/chat/completions", json={"messages": [], "stream": True})
 
     assert response.status_code == 200
-    assert response.headers["x-metarouter-provider"] == "secondary"
+    assert response.headers["x-cerberus-provider"] == "secondary"
     assert response.text == "data: hello\n\ndata: [DONE]\n\n"
 
 
@@ -157,10 +157,10 @@ def test_external_bind_requires_api_token() -> None:
 
 @pytest.mark.asyncio
 async def test_external_bind_rejects_unauthenticated_requests(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("METAROUTER_API_TOKEN", "router-token")
+    monkeypatch.setenv("CERBERUS_API_TOKEN", "router-token")
     config = RouterConfig.model_validate(
         {
-            "server": {"host": "0.0.0.0", "api_token_env": "METAROUTER_API_TOKEN"},
+            "server": {"host": "0.0.0.0", "api_token_env": "CERBERUS_API_TOKEN"},
             "providers": {"local": {"base_url": "http://127.0.0.1:8080/v1", "model": "local"}},
             "pools": {"default": {"providers": ["local"]}},
             "routing_rules": [{"match": {"default": True}, "pool": "default"}],

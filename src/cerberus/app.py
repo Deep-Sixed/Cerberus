@@ -1,4 +1,4 @@
-"""OpenAI Chat Completions API backed by portable MetaRouter policy."""
+"""OpenAI Chat Completions API backed by portable Cerberus policy."""
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -276,8 +276,8 @@ async def dispatch(
                 media_type=response.headers.get("content-type", "text/event-stream"),
                 headers={
                     "x-request-id": request_id,
-                    "x-metarouter-provider": selection.provider_id,
-                    "x-metarouter-pool": selection.pool,
+                    "x-cerberus-provider": selection.provider_id,
+                    "x-cerberus-pool": selection.pool,
                 },
             )
 
@@ -319,7 +319,7 @@ async def dispatch(
             )
         )
         if isinstance(response_body, dict):
-            response_body = {**response_body, "metarouter": metadata}
+            response_body = {**response_body, "cerberus": metadata}
         return JSONResponse(
             content=response_body, status_code=response.status_code, headers={"x-request-id": request_id}
         )
@@ -344,7 +344,7 @@ def create_app(
             await telemetry.close()
             await app.state.http_client.aclose()
 
-    app = FastAPI(title="MetaRouter v3", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Cerberus v3", version="0.1.0", lifespan=lifespan)
 
     def authenticated(request: Request) -> bool:
         if config.server.api_token_env is None:
@@ -359,7 +359,7 @@ def create_app(
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        return {"status": "ok", "service": "metarouter-v3", "cooldowns": router.cooldown_state()}
+        return {"status": "ok", "service": "cerberus-v3", "cooldowns": router.cooldown_state()}
 
     @app.get("/v1/models", response_model=None)
     async def models(request: Request) -> dict[str, Any] | JSONResponse:

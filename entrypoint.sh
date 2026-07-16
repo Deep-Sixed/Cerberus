@@ -11,7 +11,7 @@ load_secret() {
   fi
 }
 
-load_secret METAROUTER_API_TOKEN /run/secrets/metarouter_api_token
+load_secret CERBERUS_API_TOKEN /run/secrets/cerberus_api_token
 load_secret OPENROUTER_API_KEY /run/secrets/openrouter_api_key
 
 exec "$@"

@@ -5,9 +5,9 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from metarouter.app import create_app
-from metarouter.config import RouterConfig
-from metarouter.telemetry import RoutingEvent, TelemetryEmitter
+from cerberus.app import create_app
+from cerberus.config import RouterConfig
+from cerberus.telemetry import RoutingEvent, TelemetryEmitter
 
 
 def telemetry_config(monkeypatch: pytest.MonkeyPatch, tmp_path) -> RouterConfig:
@@ -152,7 +152,7 @@ async def test_forced_fallback_records_both_attempts(monkeypatch, tmp_path) -> N
     response = await _request(app, {"messages": [], "request_type": "controlled"})
 
     assert response.status_code == 200
-    assert response.json()["metarouter"]["provider"] == "secondary"
+    assert response.json()["cerberus"]["provider"] == "secondary"
     assert len(events) == 1
     event = events[0]
     assert event["provider"] == "secondary"
