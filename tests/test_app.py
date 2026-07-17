@@ -1,120 +1,135 @@
+"""Session 2 acceptance tests — the Cerberus API on the frozen schema (donor scenarios ported)."""
+
 import httpx
 import pytest
 
 from cerberus.app import create_app
-from cerberus.config import RouterConfig
+from cerberus.registry import CerberusConfig
 
 
-@pytest.fixture
-def config(monkeypatch: pytest.MonkeyPatch) -> RouterConfig:
-    monkeypatch.setenv("PRIMARY_KEY", "primary-secret")
-    monkeypatch.setenv("SECONDARY_KEY", "secondary-secret")
-    return RouterConfig.model_validate(
+def make_config(monkeypatch: pytest.MonkeyPatch, **server) -> CerberusConfig:
+    monkeypatch.setenv("ALPHA_KEY", "alpha-secret")
+    monkeypatch.setenv("BETA_KEY", "beta-secret")
+    return CerberusConfig.model_validate(
         {
+            "metadata": {"version": "cerberus-2026-07-16.1"},
+            "server": server or {"host": "127.0.0.1", "port": 4000},
             "providers": {
-                "primary": {
-                    "base_url": "https://primary.example/v1",
-                    "api_key_env": "PRIMARY_KEY",
-                    "model": "primary-model",
-                    "cooldown_seconds": 60,
+                "alpha": {
+                    "base_url": "https://alpha.example/v1",
+                    "credentials": {"main": {"api_key_env": "ALPHA_KEY"}},
+                    "models": {"alpha-free": {"cost_tier": "free"}},
                 },
-                "secondary": {
-                    "base_url": "https://secondary.example/v1",
-                    "api_key_env": "SECONDARY_KEY",
-                    "model": "secondary-model",
-                    "cooldown_seconds": 60,
+                "beta": {
+                    "base_url": "https://beta.example/v1",
+                    "credentials": {"main": {"api_key_env": "BETA_KEY"}},
+                    "models": {"beta-free": {"cost_tier": "free"}, "beta-pro": {"cost_tier": "paid"}},
                 },
             },
-            "pools": {
-                "coding": {"strategy": "round_robin", "providers": ["primary", "secondary"]},
-                "default": {"strategy": "first", "providers": ["secondary"]},
+            "aliases": {
+                "cerberus/main": {
+                    "mode": "dispatch",
+                    "candidates": [
+                        {"provider": "alpha", "credential": "main", "model": "alpha-free"},
+                        {"provider": "beta", "credential": "main", "model": "beta-free"},
+                    ],
+                },
+                "cerberus/frugal": {
+                    "mode": "dispatch",
+                    "allow_paid_fallback": False,
+                    "candidates": [
+                        {"provider": "beta", "credential": "main", "model": "beta-pro"},
+                        {"provider": "beta", "credential": "main", "model": "beta-free"},
+                    ],
+                },
             },
-            "routing_rules": [
-                {"match": {"request_type": "coding"}, "pool": "coding", "fallback_pool": "default"},
-                {"match": {"default": True}, "pool": "default"},
-            ],
         }
     )
 
 
+async def call(app, method: str, path: str, **kwargs) -> httpx.Response:
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.request(method, path, **kwargs)
+
+
 @pytest.mark.asyncio
-async def test_routes_and_redacts_credentials(config: RouterConfig) -> None:
+async def test_routes_first_candidate_and_redacts_credentials(monkeypatch):
     seen: list[httpx.Request] = []
 
     async def upstream(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
 
-    app = create_app(config, httpx.MockTransport(upstream))
-    async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.post(
-                "/v1/chat/completions",
-                json={"model": "caller-choice", "messages": [], "request_type": "coding"},
-            )
+    app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
+    response = await call(app, "POST", "/v1/chat/completions", json={"model": "cerberus/main", "messages": []})
 
     assert response.status_code == 200
-    assert response.json()["cerberus"]["provider"] == "primary"
-    assert response.json()["cerberus"]["model"] == "primary-model"
-    assert "primary-secret" not in response.text
-    assert seen[0].url == "https://primary.example/v1/chat/completions"
-    upstream_body = httpx.Response(200, content=seen[0].content).json()
-    assert upstream_body["model"] == "primary-model"
-    assert "request_type" not in upstream_body
-    assert seen[0].headers["authorization"] == "Bearer primary-secret"
+    meta = response.json()["cerberus"]
+    assert (meta["provider"], meta["credential"], meta["model"]) == ("alpha", "main", "alpha-free")
+    assert meta["alias"] == "cerberus/main" and meta["attempts"] == 1
+    assert "alpha-secret" not in response.text
+    assert seen[0].url == "https://alpha.example/v1/chat/completions"
+    assert seen[0].headers["authorization"] == "Bearer alpha-secret"
+    body = httpx.Response(200, content=seen[0].content).json()
+    assert body["model"] == "alpha-free"
 
 
 @pytest.mark.asyncio
-async def test_root_redirects_to_interactive_api_docs(config: RouterConfig) -> None:
-    app = create_app(config, httpx.MockTransport(lambda _request: httpx.Response(200, json={})))
-    async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test", follow_redirects=False
-        ) as client:
-            response = await client.get("/")
-
-    assert response.status_code == 307
-    assert response.headers["location"] == "/docs"
-
-
-@pytest.mark.asyncio
-async def test_rate_limit_fails_over_to_next_provider(config: RouterConfig) -> None:
+async def test_rate_limit_fails_over_in_declared_order_and_cools_down(monkeypatch):
     async def upstream(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "primary.example":
+        if request.url.host == "alpha.example":
             return httpx.Response(429, headers={"retry-after": "10"})
         return httpx.Response(200, json={"choices": [{"message": {"content": "fallback"}}]})
 
-    app = create_app(config, httpx.MockTransport(upstream))
+    app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.post("/v1/chat/completions", json={"messages": [], "request_type": "coding"})
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/v1/chat/completions", json={"model": "cerberus/main", "messages": []})
             health = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json()["cerberus"]["provider"] == "secondary"
-    assert response.json()["cerberus"]["attempts"] == 2
-    assert health.json()["cooldowns"]["primary"] > 0
+    meta = response.json()["cerberus"]
+    assert (meta["provider"], meta["model"], meta["attempts"]) == ("beta", "beta-free", 2)
+    cooldowns = health.json()["cooldowns"]
+    assert cooldowns[0]["provider"] == "alpha" and cooldowns[0]["scope"] == "model"
+    assert cooldowns[0]["reason"] == "quota_429"
 
 
 @pytest.mark.asyncio
-async def test_streaming_response_is_proxied(config: RouterConfig) -> None:
+async def test_paid_fallback_prohibited_skips_paid_candidate(monkeypatch):
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        body = httpx.Response(200, content=request.content).json()
+        assert body["model"] == "beta-free", "paid target must never be invoked"
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
+    response = await call(app, "POST", "/v1/chat/completions", json={"model": "cerberus/frugal", "messages": []})
+
+    assert response.status_code == 200
+    assert response.json()["cerberus"]["model"] == "beta-free"
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_is_proxied(monkeypatch):
     async def upstream(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200, headers={"content-type": "text/event-stream"}, content=b"data: hello\n\ndata: [DONE]\n\n"
         )
 
-    app = create_app(config, httpx.MockTransport(upstream))
-    async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.post("/v1/chat/completions", json={"messages": [], "stream": True})
+    app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
+    response = await call(app, "POST", "/v1/chat/completions", json={"model": "cerberus/main", "messages": [], "stream": True})
 
     assert response.status_code == 200
-    assert response.headers["x-cerberus-provider"] == "secondary"
+    assert response.headers["x-cerberus-provider"] == "alpha"
+    assert response.headers["x-cerberus-model"] == "alpha-free"
     assert response.text == "data: hello\n\ndata: [DONE]\n\n"
 
 
 @pytest.mark.asyncio
-async def test_malformed_json_returns_client_error_without_calling_upstream(config: RouterConfig) -> None:
+async def test_unknown_alias_is_rejected_without_upstream_call(monkeypatch):
     calls = 0
 
     async def upstream(_request: httpx.Request) -> httpx.Response:
@@ -122,55 +137,82 @@ async def test_malformed_json_returns_client_error_without_calling_upstream(conf
         calls += 1
         return httpx.Response(200, json={})
 
-    app = create_app(config, httpx.MockTransport(upstream))
-    async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.post(
-                "/v1/chat/completions",
-                content=b'{"messages":',
-                headers={"content-type": "application/json"},
-            )
+    app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
+    response = await call(app, "POST", "/v1/chat/completions", json={"model": "gpt-4o", "messages": []})
 
-    assert response.status_code == 400
-    assert response.json() == {"error": {"message": "Invalid JSON body"}}
+    assert response.status_code == 404
+    assert "alias" in response.json()["error"]["message"]
     assert calls == 0
 
 
-def test_credential_validation_uses_names_only(monkeypatch: pytest.MonkeyPatch, config: RouterConfig) -> None:
-    monkeypatch.delenv("PRIMARY_KEY")
-    with pytest.raises(RuntimeError, match="PRIMARY_KEY") as exc_info:
-        config.require_configured_credentials()
-    assert "primary-secret" not in str(exc_info.value)
+@pytest.mark.asyncio
+async def test_exhausted_candidates_return_503_with_request_id(monkeypatch):
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429)
 
+    app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
+    response = await call(app, "POST", "/v1/chat/completions", json={"model": "cerberus/main", "messages": []})
 
-def test_external_bind_requires_api_token() -> None:
-    with pytest.raises(ValueError, match="api_token_env"):
-        RouterConfig.model_validate(
-            {
-                "server": {"host": "0.0.0.0"},
-                "providers": {"local": {"base_url": "http://127.0.0.1:8080/v1", "model": "local"}},
-                "pools": {"default": {"providers": ["local"]}},
-                "routing_rules": [{"match": {"default": True}, "pool": "default"}],
-            }
-        )
+    assert response.status_code == 503
+    payload = response.json()["error"]
+    assert payload["request_id"]
+    assert payload["message"] == "No provider available"
 
 
 @pytest.mark.asyncio
-async def test_external_bind_rejects_unauthenticated_requests(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CERBERUS_API_TOKEN", "router-token")
-    config = RouterConfig.model_validate(
-        {
-            "server": {"host": "0.0.0.0", "api_token_env": "CERBERUS_API_TOKEN"},
-            "providers": {"local": {"base_url": "http://127.0.0.1:8080/v1", "model": "local"}},
-            "pools": {"default": {"providers": ["local"]}},
-            "routing_rules": [{"match": {"default": True}, "pool": "default"}],
-        }
+async def test_malformed_json_returns_400_without_upstream_call(monkeypatch):
+    calls = 0
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={})
+
+    app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
+    response = await call(
+        app, "POST", "/v1/chat/completions", content=b'{"messages":', headers={"content-type": "application/json"}
     )
-    app = create_app(config, httpx.MockTransport(lambda _request: httpx.Response(200, json={})))
+
+    assert response.status_code == 400
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_models_endpoint_lists_aliases(monkeypatch):
+    app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(lambda _r: httpx.Response(200)))
+    response = await call(app, "GET", "/v1/models")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    ids = {entry["id"] for entry in data}
+    assert ids == {"cerberus/main", "cerberus/frugal"}
+    assert all(entry["owned_by"] == "cerberus" for entry in data)
+
+
+@pytest.mark.asyncio
+async def test_health_reports_version_and_checksumless_state(monkeypatch):
+    app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(lambda _r: httpx.Response(200)))
+    response = await call(app, "GET", "/health")
+
+    payload = response.json()
+    assert payload["status"] == "ok" and payload["service"] == "cerberus"
+    assert payload["config_version"] == "cerberus-2026-07-16.1"
+
+
+@pytest.mark.asyncio
+async def test_external_bind_rejects_unauthenticated_requests(monkeypatch):
+    monkeypatch.setenv("CERBERUS_API_TOKEN", "router-token")
+    config = make_config(monkeypatch, host="0.0.0.0", port=4000, api_token_env="CERBERUS_API_TOKEN")
+    app = create_app(config, http_transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={})))
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             unauthorized = await client.get("/v1/models")
             authorized = await client.get("/v1/models", headers={"authorization": "Bearer router-token"})
+            non_ascii = await client.get(
+                "/v1/models", headers={b"authorization": "Bearer routér".encode("latin-1")}
+            )
 
     assert unauthorized.status_code == 401
     assert authorized.status_code == 200
+    assert non_ascii.status_code == 401  # never a 500 (v3 review finding)

@@ -1,12 +1,12 @@
-"""Command-line launcher for portable Cerberus deployments."""
+"""Command-line launcher for Cerberus."""
 
 import argparse
 import os
 
 import uvicorn
 
-from .app import create_app
-from .config import load_config
+from cerberus.app import create_app
+from cerberus.registry import load_config_document
 
 
 def main() -> None:
@@ -19,5 +19,6 @@ def main() -> None:
     if args.command == "serve":
         if args.config:
             os.environ["CERBERUS_CONFIG"] = args.config
-        config = load_config()
-        uvicorn.run(create_app(config), host=config.server.host, port=config.server.port)
+        document = load_config_document()
+        server = document.config.server
+        uvicorn.run(create_app(document), host=server.host, port=server.port)

@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 import httpx
 
-from ..config import TelemetryConfig
+from ..registry.schema import TelemetryConfig
 
 logger = logging.getLogger(__name__)
 

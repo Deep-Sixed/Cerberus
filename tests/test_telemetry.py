@@ -1,3 +1,10 @@
+"""Telemetry behavior — redaction, usage capture, bounded queue, non-blocking emission.
+
+Donor scenarios (MetaRouter v3) ported onto the Cerberus schema: the event's
+request_type field carries the alias and pool carries the mode until the S8
+schema overhaul.
+"""
+
 import json
 import time
 from datetime import datetime, timezone
@@ -6,17 +13,18 @@ import httpx
 import pytest
 
 from cerberus.app import create_app
-from cerberus.config import RouterConfig
+from cerberus.registry import CerberusConfig
 from cerberus.telemetry import RoutingEvent, TelemetryEmitter
 
 
-def telemetry_config(monkeypatch: pytest.MonkeyPatch, tmp_path) -> RouterConfig:
+def telemetry_config(monkeypatch: pytest.MonkeyPatch, tmp_path) -> CerberusConfig:
     monkeypatch.setenv("PRIMARY_KEY", "provider-test-value-primary")
     monkeypatch.setenv("SECONDARY_KEY", "provider-test-value-secondary")
     token_file = tmp_path / "contextforge-telemetry-token"
     token_file.write_text("telemetry-test-value", encoding="utf-8")
-    return RouterConfig.model_validate(
+    return CerberusConfig.model_validate(
         {
+            "metadata": {"version": "cerberus-2026-07-16.1"},
             "telemetry": {
                 "endpoint": "http://contextforge.test/v1/telemetry/routing-records",
                 "bearer_token_file": str(token_file),
@@ -25,23 +33,24 @@ def telemetry_config(monkeypatch: pytest.MonkeyPatch, tmp_path) -> RouterConfig:
             "providers": {
                 "primary": {
                     "base_url": "https://primary.example/v1",
-                    "api_key_env": "PRIMARY_KEY",
-                    "model": "primary-model",
+                    "credentials": {"main": {"api_key_env": "PRIMARY_KEY"}},
+                    "models": {"primary-model": {"cost_tier": "free"}},
                 },
                 "secondary": {
                     "base_url": "https://secondary.example/v1",
-                    "api_key_env": "SECONDARY_KEY",
-                    "model": "secondary-model",
+                    "credentials": {"main": {"api_key_env": "SECONDARY_KEY"}},
+                    "models": {"secondary-model": {"cost_tier": "free"}},
                 },
             },
-            "pools": {
-                "primary": {"providers": ["primary"]},
-                "fallback": {"providers": ["secondary"]},
+            "aliases": {
+                "cerberus/controlled": {
+                    "mode": "dispatch",
+                    "candidates": [
+                        {"provider": "primary", "credential": "main", "model": "primary-model"},
+                        {"provider": "secondary", "credential": "main", "model": "secondary-model"},
+                    ],
+                },
             },
-            "routing_rules": [
-                {"match": {"request_type": "controlled"}, "pool": "primary", "fallback_pool": "fallback"},
-                {"match": {"default": True}, "pool": "primary", "fallback_pool": "fallback"},
-            ],
         }
     )
 
@@ -74,8 +83,8 @@ async def test_non_streaming_event_is_redacted_and_includes_usage(monkeypatch, t
     response = await _request(
         app,
         {
+            "model": "cerberus/controlled",
             "messages": [{"role": "user", "content": "prompt-sensitive-value"}],
-            "request_type": "controlled",
         },
     )
 
@@ -84,8 +93,9 @@ async def test_non_streaming_event_is_redacted_and_includes_usage(monkeypatch, t
     assert events[0].headers["authorization"] == "Bearer telemetry-test-value"
     event = json.loads(events[0].content)
     assert event["schema_version"] == 1
+    assert event["request_type"] == "cerberus/controlled"  # alias (S8 renames the field)
     assert event["provider"] == "primary"
-    assert event["pool"] == "primary"
+    assert event["pool"] == "dispatch"  # mode (S8 renames the field)
     assert event["model"] == "primary-model"
     assert event["attempt_count"] == 1
     assert event["used_fallback"] is False
@@ -107,7 +117,7 @@ async def test_non_streaming_event_is_redacted_and_includes_usage(monkeypatch, t
 
 
 @pytest.mark.asyncio
-async def test_unknown_request_type_is_normalized_before_telemetry(monkeypatch, tmp_path) -> None:
+async def test_unknown_alias_emits_no_event_and_no_caller_text(monkeypatch, tmp_path) -> None:
     config = telemetry_config(monkeypatch, tmp_path)
     events: list[dict] = []
 
@@ -122,16 +132,11 @@ async def test_unknown_request_type_is_normalized_before_telemetry(monkeypatch, 
     unsafe_values = ("prompt-sensitive-value", "x" * 1_000)
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            for request_type in unsafe_values:
-                response = await client.post(
-                    "/v1/chat/completions", json={"messages": [], "request_type": request_type}
-                )
-                assert response.status_code == 200
+            for unsafe in unsafe_values:
+                response = await client.post("/v1/chat/completions", json={"model": unsafe, "messages": []})
+                assert response.status_code == 404
 
-    assert [event["request_type"] for event in events] == ["default", "default"]
-    serialized = json.dumps(events)
-    for unsafe_value in unsafe_values:
-        assert unsafe_value not in serialized
+    assert events == []
 
 
 @pytest.mark.asyncio
@@ -149,20 +154,19 @@ async def test_forced_fallback_records_both_attempts(monkeypatch, tmp_path) -> N
         return httpx.Response(201, json={"id": "event-id"})
 
     app = create_app(config, httpx.MockTransport(upstream), httpx.MockTransport(telemetry))
-    response = await _request(app, {"messages": [], "request_type": "controlled"})
+    response = await _request(app, {"model": "cerberus/controlled", "messages": []})
 
     assert response.status_code == 200
     assert response.json()["cerberus"]["provider"] == "secondary"
     assert len(events) == 1
     event = events[0]
     assert event["provider"] == "secondary"
-    assert event["pool"] == "fallback"
     assert event["used_fallback"] is True
     assert event["attempt_count"] == 2
-    assert event["attempts"][0]["provider"] == "primary"
+    assert event["attempts"][0]["provider"] == "primary/main"
     assert event["attempts"][0]["outcome"] == "retryable_status"
     assert event["attempts"][0]["http_status"] == 429
-    assert event["attempts"][1]["provider"] == "secondary"
+    assert event["attempts"][1]["provider"] == "secondary/main"
     assert event["attempts"][1]["outcome"] == "response"
 
 
@@ -184,7 +188,7 @@ async def test_streaming_event_is_emitted_with_usage(monkeypatch, tmp_path) -> N
         return httpx.Response(201, json={"id": "event-id"})
 
     app = create_app(config, httpx.MockTransport(upstream), httpx.MockTransport(telemetry))
-    response = await _request(app, {"messages": [], "stream": True, "request_type": "controlled"})
+    response = await _request(app, {"model": "cerberus/controlled", "messages": [], "stream": True})
 
     assert response.status_code == 200
     assert len(events) == 1
@@ -217,7 +221,8 @@ async def test_interrupted_stream_marks_final_attempt(monkeypatch, tmp_path) -> 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             with pytest.raises(RuntimeError, match="controlled stream interruption"):
                 await client.post(
-                    "/v1/chat/completions", json={"messages": [], "stream": True, "request_type": "controlled"}
+                    "/v1/chat/completions",
+                    json={"model": "cerberus/controlled", "messages": [], "stream": True},
                 )
 
     assert len(events) == 1
@@ -237,7 +242,7 @@ async def test_telemetry_failure_does_not_fail_or_delay_inference(monkeypatch, t
 
     app = create_app(config, httpx.MockTransport(upstream), httpx.MockTransport(telemetry))
     started = time.perf_counter()
-    response = await _request(app, {"messages": [], "request_type": "controlled"})
+    response = await _request(app, {"model": "cerberus/controlled", "messages": []})
     elapsed = time.perf_counter() - started
 
     assert response.status_code == 200
@@ -247,13 +252,13 @@ async def test_telemetry_failure_does_not_fail_or_delay_inference(monkeypatch, t
 @pytest.mark.asyncio
 async def test_bounded_telemetry_queue_drops_new_events_when_full(monkeypatch, tmp_path) -> None:
     config = telemetry_config(monkeypatch, tmp_path)
-    config.telemetry = config.telemetry.model_copy(update={"queue_capacity": 1})
-    emitter = TelemetryEmitter(config.telemetry, httpx.MockTransport(lambda _request: httpx.Response(201)))
+    telemetry_settings = config.telemetry.model_copy(update={"queue_capacity": 1})
+    emitter = TelemetryEmitter(telemetry_settings, httpx.MockTransport(lambda _request: httpx.Response(201)))
     event = RoutingEvent(
         request_id="123e4567-e89b-42d3-a456-426614174000",
-        request_type="controlled",
+        request_type="cerberus/controlled",
         provider="primary",
-        pool="primary",
+        pool="dispatch",
         model="primary-model",
         used_fallback=False,
         attempts=[],
@@ -286,7 +291,7 @@ async def test_invalid_upstream_json_emits_redacted_failure_event(monkeypatch, t
         return httpx.Response(201, json={"id": "event-id"})
 
     app = create_app(config, httpx.MockTransport(upstream), httpx.MockTransport(telemetry))
-    response = await _request(app, {"messages": [], "request_type": "controlled"})
+    response = await _request(app, {"model": "cerberus/controlled", "messages": []})
 
     assert response.status_code == 502
     assert len(events) == 1
@@ -298,25 +303,22 @@ async def test_invalid_upstream_json_emits_redacted_failure_event(monkeypatch, t
 
 def test_telemetry_configuration_requires_endpoint_and_token_file_together() -> None:
     with pytest.raises(ValueError, match="configured together"):
-        RouterConfig.model_validate(
+        CerberusConfig.model_validate(
             {
+                "metadata": {"version": "cerberus-2026-07-16.1"},
                 "telemetry": {"endpoint": "http://contextforge.test/v1/telemetry/routing-records"},
-                "providers": {"local": {"base_url": "http://localhost:8080/v1", "model": "local"}},
-                "pools": {"default": {"providers": ["local"]}},
-                "routing_rules": [{"match": {"default": True}, "pool": "default"}],
-            }
-        )
-
-
-def test_routing_rule_rejects_oversized_request_type() -> None:
-    with pytest.raises(ValueError, match="request_type"):
-        RouterConfig.model_validate(
-            {
-                "providers": {"local": {"base_url": "http://localhost:8080/v1", "model": "local"}},
-                "pools": {"default": {"providers": ["local"]}},
-                "routing_rules": [
-                    {"match": {"request_type": "x" * 101}, "pool": "default"},
-                    {"match": {"default": True}, "pool": "default"},
-                ],
+                "providers": {
+                    "local": {
+                        "base_url": "http://localhost:8080/v1",
+                        "credentials": {"main": {"api_key_env": "LOCAL_KEY"}},
+                        "models": {"local": {"cost_tier": "free"}},
+                    }
+                },
+                "aliases": {
+                    "cerberus/free": {
+                        "mode": "free",
+                        "candidates": [{"provider": "local", "credential": "main", "model": "local"}],
+                    }
+                },
             }
         )
