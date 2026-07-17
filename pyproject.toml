@@ -3,7 +3,7 @@ name = "cerberus"
 version = "0.1.0"
 description = "Cerberus - unified policy routing service (Dispatch, Free Router, Fusion)"
 readme = "README.md"
-requires-python = ">=3.14,<3.15"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [{ name = "Deep-Sixed" }]
 dependencies = [
@@ -18,6 +18,11 @@ dependencies = [
 [build-system]
 requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cerberus"]
+# dashboard assets must ship in the wheel even if untracked at build time
+artifacts = ["src/cerberus/ui/static/*"]
 
 [project.scripts]
 cerberus = "cerberus.cli:main"
@@ -35,4 +40,4 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py314"
+target-version = "py312"

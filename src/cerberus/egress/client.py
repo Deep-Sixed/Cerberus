@@ -70,7 +70,7 @@ class StreamingUsageCollector:
             return
         try:
             body = json.loads(payload)
-        except json.JSONDecodeError, UnicodeDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return
         if isinstance(body, dict) and (usage := token_usage(body)) is not None:
             self.usage = usage

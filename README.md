@@ -38,9 +38,14 @@ each module's charter.
 ## Development
 
 ```bash
-uv sync                  # env (Python 3.14.5)
+uv sync                  # env — uses the available sandbox interpreter (Python 3.12+)
 ./scripts/ci.sh          # ruff + pytest — must be green at end of every session
 ```
+
+Development supports **Python 3.12 or newer** (`requires-python = ">=3.12"`); validate with
+whatever interpreter the sandbox provides. The Containerfile's `python:3.14.5-slim` base is the
+**production-image lane only** — it is not the minimum development interpreter and must not block
+development acceptance. Final 3.14.x validation happens at production-readiness/promotion.
 
 Keep deployment configuration separate from product source (compose + config +
 file-secrets only — no source in the gateway tree). Secrets are references (environment /
