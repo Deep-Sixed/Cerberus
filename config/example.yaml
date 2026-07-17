@@ -3,7 +3,7 @@
 # the Cerberus registry schema. Secrets are env-var NAMES resolved by the
 # entrypoint file-secrets bridge (/run/secrets/*); never values.
 metadata:
-  version: cerberus-2026-07-17.1
+  version: cerberus-2026-07-17.2
 
 server:
   host: 0.0.0.0                       # in-container bind; publish loopback-only on the host
@@ -23,16 +23,23 @@ providers:
       main: { api_key_env: OPENROUTER_API_KEY }
     models:
       google/gemma-4-26b-a4b-it:free: { cost_tier: free, capabilities: [chat] }
+      anthropic/claude-sonnet-4.5: { cost_tier: paid, capabilities: [chat, tools, coding] }
 
 identities:
   dev:
     credential_env: CB_KEY_DEV
-    allowed_modes: [dispatch]
-    allowed_aliases: [cerberus/dispatch-dev]
+    allowed_modes: [dispatch, free]
+    allowed_aliases: [cerberus/dispatch-dev, cerberus/free-dev]
     default_alias: cerberus/dispatch-dev
 
 aliases:
   cerberus/dispatch-dev:
     mode: dispatch
+    candidates:
+      - { provider: openrouter, credential: main, model: "google/gemma-4-26b-a4b-it:free" }
+
+  # Free Router: free-only. A paid candidate here is a config-load error.
+  cerberus/free-dev:
+    mode: free
     candidates:
       - { provider: openrouter, credential: main, model: "google/gemma-4-26b-a4b-it:free" }
