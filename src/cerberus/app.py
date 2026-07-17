@@ -255,7 +255,7 @@ def create_app(
         if error is not None or path is None:
             return error or JSONResponse(status_code=400, content={"error": {"message": "path is required"}})
         try:
-            candidate = ConfigLifecycle.validate(path)
+            candidate = lifecycle.validate(path)
         except (ValidationError, RuntimeError, OSError, ValueError) as exc:
             return JSONResponse(status_code=422, content={"valid": False, "error": str(exc)})
         return JSONResponse(content={"valid": True, "version": candidate.version, "checksum": candidate.checksum})

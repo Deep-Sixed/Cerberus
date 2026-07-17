@@ -17,6 +17,7 @@ class ConfigLifecycle:
         self._active = initial
         self._history: list[ConfigDocument] = []
         self._shadow: ConfigDocument | None = None
+        self._version_checksums = {initial.version: initial.checksum}
 
     @property
     def active(self) -> ConfigDocument:
@@ -26,10 +27,18 @@ class ConfigLifecycle:
     def shadow(self) -> ConfigDocument | None:
         return self._shadow
 
-    @staticmethod
-    def validate(path: str) -> ConfigDocument:
-        """Full validation including credential presence; raises on any failure."""
-        return load_config_document(path)
+    def validate(self, path: str) -> ConfigDocument:
+        """Validate and permanently bind a version to its first observed checksum."""
+
+        document = load_config_document(path)
+        existing = self._version_checksums.get(document.version)
+        if existing is not None and existing != document.checksum:
+            raise ValueError(
+                f"configuration version {document.version!r} is already bound to checksum {existing}; "
+                f"candidate checksum is {document.checksum}"
+            )
+        self._version_checksums.setdefault(document.version, document.checksum)
+        return document
 
     def activate(self, path: str) -> ConfigDocument:
         document = self.validate(path)

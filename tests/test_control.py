@@ -107,6 +107,56 @@ async def test_activate_swaps_atomically_and_rollback_restores(env, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_version_cannot_be_rebound_to_a_different_checksum(env, tmp_path):
+    active_path = write_config(tmp_path, "active.yaml", raw_config("cerberus-2026-07-16.1"))
+    collision_path = write_config(
+        tmp_path,
+        "collision.yaml",
+        raw_config("cerberus-2026-07-16.1", model="different-content"),
+    )
+    active = load_config_document(active_path)
+    app = create_app(active, http_transport=httpx.MockTransport(ok_upstream))
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            validated = await client.post("/admin/validate", json={"path": collision_path})
+            shadowed = await client.post("/admin/shadow", json={"path": collision_path})
+            activated = await client.post("/admin/activate", json={"path": collision_path})
+            status = await client.get("/admin/status")
+
+    for response in (validated, shadowed, activated):
+        assert response.status_code == 422
+        assert "already bound to checksum" in response.json()["error"]
+    assert status.json()["active"]["version"] == active.version
+    assert status.json()["active"]["checksum"] == active.checksum
+    assert status.json()["shadow"] is None
+    assert status.json()["rollback_depth"] == 0
+
+
+@pytest.mark.asyncio
+async def test_rolled_back_version_binding_remains_reserved(env, tmp_path):
+    v1 = write_config(tmp_path, "v1.yaml", raw_config("cerberus-2026-07-16.1"))
+    v2 = write_config(tmp_path, "v2.yaml", raw_config("cerberus-2026-07-16.2", model="alpha-two"))
+    v2_collision = write_config(
+        tmp_path,
+        "v2-collision.yaml",
+        raw_config("cerberus-2026-07-16.2", model="different-alpha-two"),
+    )
+    app = create_app(load_config_document(v1), http_transport=httpx.MockTransport(ok_upstream))
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.post("/admin/activate", json={"path": v2})).status_code == 200
+            assert (await client.post("/admin/rollback")).status_code == 200
+            rebound = await client.post("/admin/activate", json={"path": v2_collision})
+
+    assert rebound.status_code == 422
+    assert "already bound to checksum" in rebound.json()["error"]
+
+
+@pytest.mark.asyncio
 async def test_rollback_without_history_is_conflict(env, tmp_path):
     doc = load_config_document(write_config(tmp_path, "v1.yaml", raw_config("cerberus-2026-07-16.1")))
     app = create_app(doc, http_transport=httpx.MockTransport(ok_upstream))
