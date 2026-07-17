@@ -12,6 +12,8 @@ load_secret() {
 }
 
 load_secret CERBERUS_API_TOKEN /run/secrets/cerberus_api_token
+load_secret CERBERUS_ADMIN_TOKEN /run/secrets/cerberus_admin_token
+load_secret CB_KEY_DEV /run/secrets/cb_key_dev
 load_secret OPENROUTER_API_KEY /run/secrets/openrouter_api_key
 
 exec "$@"

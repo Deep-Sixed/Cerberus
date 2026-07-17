@@ -1,0 +1,36 @@
+# Cerberus development configuration — the Dispatch vertical slice, native run.
+# One provider, one credential NAME (value comes from the environment), one
+# model, one identity, one dispatch alias. No fusion, telemetry disabled.
+# Secrets are env-var NAMES only; never place values in this file.
+metadata:
+  version: cerberus-2026-07-17.1
+
+server:
+  host: 127.0.0.1
+  port: 4102   # 4101 is live metarouter-v3; 4000 is the cutover port — dev stays clear of both
+
+state:
+  path: var/cooldowns.sqlite3   # repo-relative, gitignored; survives restarts
+
+telemetry: {}                   # disabled for the first slice; ContextForge wiring is a later phase
+
+providers:
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    credentials:
+      main: { api_key_env: OPENROUTER_API_KEY }
+    models:
+      google/gemma-4-26b-a4b-it:free: { cost_tier: free, capabilities: [chat] }
+
+identities:
+  dev:
+    credential_env: CB_KEY_DEV
+    allowed_modes: [dispatch]
+    allowed_aliases: [cerberus/dispatch-dev]
+    default_alias: cerberus/dispatch-dev
+
+aliases:
+  cerberus/dispatch-dev:
+    mode: dispatch
+    candidates:
+      - { provider: openrouter, credential: main, model: "google/gemma-4-26b-a4b-it:free" }

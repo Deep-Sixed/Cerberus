@@ -1,31 +1,38 @@
+# Cerberus container default configuration (mounted at /etc/cerberus/config.yaml).
+# Replaces the retired MetaRouter v3 donor config: this file validates against
+# the Cerberus registry schema. Secrets are env-var NAMES resolved by the
+# entrypoint file-secrets bridge (/run/secrets/*); never values.
+metadata:
+  version: cerberus-2026-07-17.1
+
 server:
-  host: 127.0.0.1
+  host: 0.0.0.0                       # in-container bind; publish loopback-only on the host
   port: 4101
+  api_token_env: CERBERUS_API_TOKEN   # inference surface (when identities are bypassed)
+  admin_token_env: CERBERUS_ADMIN_TOKEN  # remote read-only admin; mutations stay loopback-only
+
+state:
+  path: /var/lib/cerberus/cooldowns.sqlite3   # mount a writable volume here
+
+telemetry: {}                         # enable by pointing at ContextForge + bearer token file
 
 providers:
-  openrouter_free:
-    protocol: openai_chat
+  openrouter:
     base_url: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
-    model: openrouter/free
-    cooldown_seconds: 300
-  local_llama:
-    protocol: openai_chat
-    base_url: http://127.0.0.1:8080/v1
-    model: qwen3-coder
-    cooldown_seconds: 30
+    credentials:
+      main: { api_key_env: OPENROUTER_API_KEY }
+    models:
+      google/gemma-4-26b-a4b-it:free: { cost_tier: free, capabilities: [chat] }
 
-pools:
-  coding:
-    strategy: round_robin
-    providers: [openrouter_free, local_llama]
-  default:
-    strategy: first
-    providers: [openrouter_free]
+identities:
+  dev:
+    credential_env: CB_KEY_DEV
+    allowed_modes: [dispatch]
+    allowed_aliases: [cerberus/dispatch-dev]
+    default_alias: cerberus/dispatch-dev
 
-routing_rules:
-  - match: { request_type: coding }
-    pool: coding
-    fallback_pool: default
-  - match: { default: true }
-    pool: default
+aliases:
+  cerberus/dispatch-dev:
+    mode: dispatch
+    candidates:
+      - { provider: openrouter, credential: main, model: "google/gemma-4-26b-a4b-it:free" }
