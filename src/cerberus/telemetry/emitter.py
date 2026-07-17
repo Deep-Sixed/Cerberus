@@ -24,7 +24,7 @@ AttemptOutcome = Literal[
     "invalid_response",
     "stream_interrupted",
 ]
-RoutingOutcome = Literal["success", "upstream_error", "routing_exhausted", "stream_interrupted"]
+RoutingOutcome = Literal["success", "upstream_error", "routing_exhausted", "stream_interrupted", "unauthorized"]
 
 
 @dataclass(slots=True)
@@ -53,6 +53,7 @@ class RoutingEvent:
     token_usage: dict[str, int] | None
     timestamp: datetime
     streaming: bool
+    identity: str | None = None
     schema_version: int = SCHEMA_VERSION
 
     def as_payload(self) -> dict[str, Any]:
@@ -60,6 +61,7 @@ class RoutingEvent:
             "schema_version": self.schema_version,
             "request_id": self.request_id,
             "request_type": self.request_type,
+            "identity": self.identity,
             "provider": self.provider,
             "pool": self.pool,
             "model": self.model,

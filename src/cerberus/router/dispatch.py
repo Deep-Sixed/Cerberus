@@ -54,6 +54,7 @@ def _event(
     usage: dict[str, int] | None,
     streaming: bool,
     fallback: bool,
+    identity: str | None,
 ) -> RoutingEvent:
     # S2 bridge onto the donor event shape: request_type carries the alias,
     # pool carries the mode. S8 replaces this with the unified Cerberus schema.
@@ -71,6 +72,24 @@ def _event(
         token_usage=usage,
         timestamp=datetime.now(timezone.utc),
         streaming=streaming,
+        identity=identity,
+    )
+
+
+def unauthorized_event(*, alias_name: str, mode: str, identity: str | None) -> RoutingEvent:
+    return _event(
+        request_id=str(uuid.uuid4()),
+        alias=alias_name,
+        mode=mode,
+        target=None,
+        attempts=[],
+        http_status=403,
+        outcome="unauthorized",
+        started_at=time.perf_counter(),
+        usage=None,
+        streaming=False,
+        fallback=False,
+        identity=identity,
     )
 
 
@@ -78,6 +97,7 @@ async def dispatch(
     *,
     body: dict[str, Any],
     alias_name: str,
+    identity_name: str | None = None,
     document: ConfigDocument,
     store: InMemoryCooldownStore,
     client: httpx.AsyncClient,
@@ -152,6 +172,7 @@ async def dispatch(
             "request_id": request_id,
             "alias": alias_name,
             "mode": alias.mode,
+            "identity": identity_name,
             **target.describe(),
             "attempts": attempted,
             "config_version": document.version,
@@ -192,6 +213,7 @@ async def dispatch(
                             usage=collector.usage,
                             streaming=True,
                             fallback=used_fallback,
+                            identity=identity_name,
                         )
                     )
 
@@ -225,6 +247,7 @@ async def dispatch(
                     usage=None,
                     streaming=False,
                     fallback=used_fallback,
+                    identity=identity_name,
                 )
             )
             return JSONResponse(
@@ -245,6 +268,7 @@ async def dispatch(
                 usage=token_usage(response_body) if isinstance(response_body, dict) else None,
                 streaming=False,
                 fallback=used_fallback,
+                identity=identity_name,
             )
         )
         if isinstance(response_body, dict):
@@ -266,6 +290,7 @@ async def dispatch(
             usage=None,
             streaming=streaming,
             fallback=False,
+            identity=identity_name,
         )
     )
     return JSONResponse(

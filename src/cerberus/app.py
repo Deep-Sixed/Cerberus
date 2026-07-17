@@ -16,8 +16,9 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
+from cerberus.identity import IdentityContext, authorization_error, resolve_identity
 from cerberus.registry import CerberusConfig, ConfigDocument, load_config_document
-from cerberus.router.dispatch import dispatch
+from cerberus.router.dispatch import dispatch, unauthorized_event
 from cerberus.state import InMemoryCooldownStore, SqliteCooldownStore
 from cerberus.telemetry import TelemetryEmitter
 
@@ -61,6 +62,11 @@ def create_app(
     app.state.document = document
     app.state.cooldowns = store
 
+    identities_configured = bool(document.config.identities)
+
+    def resolve(request: Request) -> IdentityContext | None:
+        return resolve_identity(document.config, request)
+
     def authenticated(request: Request) -> bool:
         token_env = document.config.server.api_token_env
         if token_env is None:
@@ -89,19 +95,34 @@ def create_app(
 
     @app.get("/v1/models", response_model=None)
     async def models(request: Request) -> dict[str, Any] | JSONResponse:
-        if not authenticated(request):
-            return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
+        if identities_configured:
+            context = resolve(request)
+            if context is None:
+                return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
+            visible = [
+                (alias_name, document.config.aliases[alias_name])
+                for alias_name in context.identity.allowed_aliases
+            ]
+        else:
+            if not authenticated(request):
+                return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
+            visible = list(document.config.aliases.items())
         return {
             "object": "list",
             "data": [
                 {"id": alias_name, "object": "model", "owned_by": "cerberus", "cerberus_mode": alias.mode}
-                for alias_name, alias in document.config.aliases.items()
+                for alias_name, alias in visible
             ],
         }
 
     @app.post("/v1/chat/completions", response_model=None)
     async def chat_completions(request: Request) -> JSONResponse | StreamingResponse:
-        if not authenticated(request):
+        context: IdentityContext | None = None
+        if identities_configured:
+            context = resolve(request)
+            if context is None:
+                return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
+        elif not authenticated(request):
             return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
         try:
             body = await request.json()
@@ -110,14 +131,28 @@ def create_app(
         if not isinstance(body, dict):
             return JSONResponse(status_code=400, content={"error": {"message": "JSON object body required"}})
         alias_name = body.get("model")
+        if alias_name is None and context is not None and context.identity.default_alias:
+            alias_name = context.identity.default_alias
         if not isinstance(alias_name, str) or alias_name not in document.config.aliases:
             return JSONResponse(
                 status_code=404,
                 content={"error": {"message": f"Unknown alias {alias_name!r}; see /v1/models"}},
             )
+        alias = document.config.aliases[alias_name]
+        if context is not None:
+            denial = authorization_error(context, alias_name, alias)
+            if denial is not None:
+                telemetry.emit(
+                    unauthorized_event(alias_name=alias_name, mode=alias.mode, identity=context.name)
+                )
+                return JSONResponse(
+                    status_code=403,
+                    content={"error": {"message": f"Identity not authorized for {alias_name!r}", "reason": denial}},
+                )
         return await dispatch(
             body=body,
             alias_name=alias_name,
+            identity_name=context.name if context else None,
             document=document,
             store=store,
             client=request.app.state.http_client,
