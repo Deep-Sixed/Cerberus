@@ -8,15 +8,17 @@ activation can never silently rebind the process's trust anchors.
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import secrets
 from contextlib import asynccontextmanager
+from importlib.resources import files
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
 from cerberus.control import ConfigLifecycle
@@ -32,6 +34,40 @@ from cerberus.registry import CerberusConfig, ConfigDocument, load_config_docume
 from cerberus.router.dispatch import dispatch, shadow_decision_event, unauthorized_event
 from cerberus.state import InMemoryCooldownStore, SqliteCooldownStore
 from cerberus.telemetry import TelemetryEmitter
+
+
+def _release_id() -> str:
+    """Deployment release identifier stamped on every routing event.
+
+    Production sets CERBERUS_RELEASE_ID (the release-manifest digest). Absent
+    that, fall back to a deterministic, explicitly dev-marked identifier so the
+    field is never empty and never random.
+    """
+
+    configured = os.environ.get("CERBERUS_RELEASE_ID", "").strip()
+    if configured:
+        return configured
+    try:
+        version = importlib.metadata.version("cerberus")
+    except importlib.metadata.PackageNotFoundError:
+        version = "unpackaged"
+    return f"dev-{version}"
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+_ADMIN_UI_HEADERS = {
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    "content-security-policy": (
+        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+        "img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    ),
+}
+
+
+def _static_asset(name: str) -> str:
+    return files("cerberus.ui").joinpath("static").joinpath(name).read_text(encoding="utf-8")
 
 
 def _document_for(config: CerberusConfig) -> ConfigDocument:
@@ -60,7 +96,17 @@ def create_app(
     boot_config = document.config  # infrastructure bindings: fixed at boot
     state_path = boot_config.state.path
     store = SqliteCooldownStore(state_path) if state_path else InMemoryCooldownStore()
-    telemetry = TelemetryEmitter(boot_config.telemetry, telemetry_transport)
+    telemetry = TelemetryEmitter(
+        boot_config.telemetry,
+        telemetry_transport,
+        release_id=_release_id(),
+    )
+    # fail at boot, not first request, if packaging dropped the dashboard assets
+    admin_ui_assets = {
+        "index.html": ("text/html; charset=utf-8", _static_asset("index.html")),
+        "app.css": ("text/css; charset=utf-8", _static_asset("app.css")),
+        "app.js": ("text/javascript; charset=utf-8", _static_asset("app.js")),
+    }
     verifier = (
         AuthentikVerifier(boot_config.authentik, jwks_transport) if boot_config.authentik is not None else None
     )
@@ -126,14 +172,27 @@ def create_app(
     # -- admin surface (control plane) ------------------------------------
 
     def admin_denied(request: Request) -> JSONResponse | None:
-        if not authenticated(request):
-            return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
+        """Loopback-only or admin-scoped credential (PLAN Session 9).
+
+        With a server token configured, the token is the admin credential and
+        origin does not widen access. Without one, only loopback peers are
+        admitted — judged from the transport peer address, never from
+        forwarding headers, which any client can forge.
+        """
+
+        if boot_config.server.api_token_env is not None:
+            if not authenticated(request):
+                return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
+            return None
+        client_host = request.client.host if request.client is not None else None
+        if client_host not in _LOOPBACK_HOSTS:
+            return JSONResponse(status_code=403, content={"error": {"message": "Admin surface is loopback-only"}})
         return None
 
     async def admin_body_path(request: Request) -> tuple[str | None, JSONResponse | None]:
         try:
             body = await request.json()
-        except json.JSONDecodeError, UnicodeDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return None, JSONResponse(status_code=400, content={"error": {"message": "Invalid JSON body"}})
         if not isinstance(body, dict):
             return None, JSONResponse(status_code=400, content={"error": {"message": "JSON object body required"}})
@@ -206,6 +265,32 @@ def create_app(
             return JSONResponse(status_code=422, content={"armed": False, "error": str(exc)})
         return JSONResponse(content={"shadow_version": shadow.version if shadow else None})
 
+    @app.get("/admin/events", include_in_schema=False, response_model=None)
+    async def admin_events(request: Request) -> Response:
+        denied = admin_denied(request)
+        if denied is not None:
+            return denied
+        return JSONResponse(content={"events": telemetry.recent_events_snapshot()}, headers=_ADMIN_UI_HEADERS)
+
+    def serve_asset(request: Request, name: str) -> Response:
+        denied = admin_denied(request)
+        if denied is not None:
+            return denied
+        media_type, body = admin_ui_assets[name]
+        return Response(content=body, media_type=media_type, headers=_ADMIN_UI_HEADERS)
+
+    @app.get("/admin/ui", include_in_schema=False, response_model=None)
+    async def admin_ui(request: Request) -> Response:
+        return serve_asset(request, "index.html")
+
+    @app.get("/admin/ui/app.css", include_in_schema=False, response_model=None)
+    async def admin_ui_css(request: Request) -> Response:
+        return serve_asset(request, "app.css")
+
+    @app.get("/admin/ui/app.js", include_in_schema=False, response_model=None)
+    async def admin_ui_js(request: Request) -> Response:
+        return serve_asset(request, "app.js")
+
     # -- inference surface -------------------------------------------------
 
     @app.get("/v1/models", response_model=None)
@@ -241,7 +326,7 @@ def create_app(
             return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
         try:
             body = await request.json()
-        except json.JSONDecodeError, UnicodeDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return JSONResponse(status_code=400, content={"error": {"message": "Invalid JSON body"}})
         if not isinstance(body, dict):
             return JSONResponse(status_code=400, content={"error": {"message": "JSON object body required"}})

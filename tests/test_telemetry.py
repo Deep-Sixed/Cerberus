@@ -92,10 +92,10 @@ async def test_non_streaming_event_is_redacted_and_includes_usage(monkeypatch, t
     assert len(events) == 1
     assert events[0].headers["authorization"] == "Bearer telemetry-test-value"
     event = json.loads(events[0].content)
-    assert event["schema_version"] == 1
-    assert event["request_type"] == "cerberus/controlled"  # alias (S8 renames the field)
+    assert event["schema_version"] == 2
+    assert event["alias"] == "cerberus/controlled"
     assert event["provider"] == "primary"
-    assert event["pool"] == "dispatch"  # mode (S8 renames the field)
+    assert event["mode"] == "dispatch"
     assert event["model"] == "primary-model"
     assert event["attempt_count"] == 1
     assert event["used_fallback"] is False
@@ -253,12 +253,14 @@ async def test_telemetry_failure_does_not_fail_or_delay_inference(monkeypatch, t
 async def test_bounded_telemetry_queue_drops_new_events_when_full(monkeypatch, tmp_path) -> None:
     config = telemetry_config(monkeypatch, tmp_path)
     telemetry_settings = config.telemetry.model_copy(update={"queue_capacity": 1})
-    emitter = TelemetryEmitter(telemetry_settings, httpx.MockTransport(lambda _request: httpx.Response(201)))
+    emitter = TelemetryEmitter(
+        telemetry_settings, httpx.MockTransport(lambda _request: httpx.Response(201)), release_id="test-release"
+    )
     event = RoutingEvent(
         request_id="123e4567-e89b-42d3-a456-426614174000",
-        request_type="cerberus/controlled",
+        alias="cerberus/controlled",
         provider="primary",
-        pool="dispatch",
+        mode="dispatch",
         model="primary-model",
         used_fallback=False,
         attempts=[],
@@ -322,3 +324,129 @@ def test_telemetry_configuration_requires_endpoint_and_token_file_together() -> 
                 },
             }
         )
+
+
+# -- Session 8 hardening: identity fields, snapshot semantics, drain ----------
+
+
+def _minimal_event(**overrides) -> RoutingEvent:
+    base = dict(
+        request_id="123e4567-e89b-42d3-a456-426614174000",
+        alias="cerberus/controlled",
+        provider="primary",
+        mode="dispatch",
+        model="primary-model",
+        used_fallback=False,
+        attempts=[],
+        http_status=200,
+        outcome="success",
+        latency_ms=1.0,
+        token_usage=None,
+        timestamp=datetime.now(timezone.utc),
+        streaming=False,
+        exclusions=[{"provider": "secondary", "reason": "cost_tier"}],
+    )
+    base.update(overrides)
+    return RoutingEvent(**base)
+
+
+def test_emitter_rejects_empty_release_id(monkeypatch, tmp_path) -> None:
+    config = telemetry_config(monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="release_id"):
+        TelemetryEmitter(config.telemetry, release_id="")
+
+
+def test_release_id_dev_fallback_is_deterministic_and_marked(monkeypatch) -> None:
+    from cerberus.app import _release_id
+
+    monkeypatch.delenv("CERBERUS_RELEASE_ID", raising=False)
+    fallback = _release_id()
+    assert fallback == _release_id()  # deterministic
+    assert fallback.startswith("dev-")  # explicitly dev-marked
+    monkeypatch.setenv("CERBERUS_RELEASE_ID", "release-sha256-abc")
+    assert _release_id() == "release-sha256-abc"
+
+
+def test_recent_events_snapshot_is_bounded_ordered_and_isolated(monkeypatch, tmp_path) -> None:
+    config = telemetry_config(monkeypatch, tmp_path)
+    emitter = TelemetryEmitter(config.telemetry, release_id="test-release", recent_capacity=3)
+
+    for index in range(5):
+        emitter.emit(_minimal_event(request_id=f"00000000-0000-4000-8000-00000000000{index}"))
+
+    snapshot = emitter.recent_events_snapshot()
+    # bounded to capacity, newest first, oldest evicted
+    assert [e["request_id"][-1] for e in snapshot] == ["4", "3", "2"]
+    assert all(e["release_id"] == "test-release" for e in snapshot)
+    # caller mutation of the returned value must not corrupt the store
+    snapshot[0]["outcome"] = "tampered"
+    snapshot[0]["exclusions"].append({"injected": True})
+    fresh = emitter.recent_events_snapshot()
+    assert fresh[0]["outcome"] == "success"
+    assert fresh[0]["exclusions"] == [{"provider": "secondary", "reason": "cost_tier"}]
+
+
+def test_recorded_event_is_immune_to_later_request_path_mutation(monkeypatch, tmp_path) -> None:
+    config = telemetry_config(monkeypatch, tmp_path)
+    emitter = TelemetryEmitter(config.telemetry, release_id="test-release")
+    exclusions = [{"provider": "secondary", "reason": "cost_tier"}]
+    emitter.emit(_minimal_event(exclusions=exclusions))
+
+    exclusions.append({"provider": "late", "reason": "mutated_after_emit"})
+    exclusions[0]["reason"] = "rewritten"
+
+    recorded = emitter.recent_events_snapshot()[0]
+    assert recorded["exclusions"] == [{"provider": "secondary", "reason": "cost_tier"}]
+
+
+@pytest.mark.asyncio
+async def test_close_delivers_queued_events_before_shutdown(monkeypatch, tmp_path) -> None:
+    config = telemetry_config(monkeypatch, tmp_path)
+    delivered: list[dict] = []
+
+    async def sink(request: httpx.Request) -> httpx.Response:
+        delivered.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "event-id"})
+
+    emitter = TelemetryEmitter(config.telemetry, httpx.MockTransport(sink), release_id="test-release")
+    await emitter.start()
+    for index in range(4):
+        emitter.emit(_minimal_event(request_id=f"00000000-0000-4000-8000-00000000000{index}"))
+    await emitter.close()
+
+    assert len(delivered) == 4
+    assert emitter.dropped_events == 0
+
+
+@pytest.mark.asyncio
+async def test_event_config_version_binds_to_decision_time_config(monkeypatch, tmp_path) -> None:
+    """A config activation while a request is in flight must not relabel its event."""
+
+    from tests.test_control import raw_config, write_config
+
+    monkeypatch.setenv("ALPHA_KEY", "alpha-secret")
+    version_b = write_config(tmp_path, "v2.yaml", raw_config("cerberus-2026-07-16.2"))
+    doc_holder: dict = {}
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        # mid-flight: operator activates config B while this request routes on A
+        doc_holder["app"].state.lifecycle.activate(version_b)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    from cerberus.registry import load_config_document
+
+    doc = load_config_document(write_config(tmp_path, "v1.yaml", raw_config("cerberus-2026-07-16.1")))
+    app = create_app(doc, http_transport=httpx.MockTransport(upstream))
+    doc_holder["app"] = app
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 40001))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/v1/chat/completions", json={"model": "cerberus/free", "messages": []})
+            health = await client.get("/health")
+            events = await client.get("/admin/events")
+
+    assert response.status_code == 200
+    assert health.json()["config_version"] == "cerberus-2026-07-16.2"  # B is live now...
+    event = events.json()["events"][0]
+    assert event["config_version"] == "cerberus-2026-07-16.1"  # ...but the event kept A
+    assert event["release_id"]

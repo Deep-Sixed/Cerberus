@@ -138,7 +138,7 @@ async def test_non_allowed_alias_is_403_and_telemetried_with_identity(monkeypatc
     assert len(events) == 1
     assert events[0]["outcome"] == "unauthorized"
     assert events[0]["identity"] == "recon"
-    assert events[0]["request_type"] == "cerberus/dispatch-code"
+    assert events[0]["alias"] == "cerberus/dispatch-code"
 
 
 @pytest.mark.asyncio

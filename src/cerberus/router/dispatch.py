@@ -56,16 +56,20 @@ def _event(
     fallback: bool,
     identity: str | None,
     config_version: str | None = None,
+    candidates: list[str] | None = None,
+    exclusions: list[dict] | None = None,
 ) -> RoutingEvent:
-    # S2 bridge onto the donor event shape: request_type carries the alias,
-    # pool carries the mode. S8 replaces this with the unified Cerberus schema.
     return RoutingEvent(
         request_id=request_id,
-        request_type=alias,
+        alias=alias,
         provider=target.provider_id if target else None,
-        pool=mode,
+        mode=mode,
         model=target.model if target else None,
         used_fallback=fallback,
+        credential=target.credential_id if target else None,
+        cost_tier=target.cost_tier if target else None,
+        candidates=candidates,
+        exclusions=exclusions,
         attempts=attempts,
         http_status=http_status,
         outcome=outcome,
@@ -169,6 +173,7 @@ async def dispatch(
     streaming = bool(body.get("stream", False))
 
     targets = ordered_targets(config, alias_name)
+    ordered = [f"{t.provider_id}/{t.credential_id}/{t.model}" for t in targets]
     eligible, exclusions = cost_eligible(alias, targets)
     attempts: list[RoutingAttempt] = []
     attempted = 0
@@ -274,6 +279,8 @@ async def dispatch(
                             fallback=used_fallback,
                             identity=identity_name,
                             config_version=document.version,
+                            candidates=ordered,
+                            exclusions=list(exclusions),
                         )
                     )
 
@@ -290,7 +297,7 @@ async def dispatch(
 
         try:
             response_body = response.json() if response.content else {}
-        except json.JSONDecodeError, UnicodeDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             final_attempt.outcome = "invalid_response"
             final_attempt.latency_ms = (time.perf_counter() - attempt_started) * 1000
             await response.aclose()
@@ -309,6 +316,8 @@ async def dispatch(
                     fallback=used_fallback,
                     identity=identity_name,
                     config_version=document.version,
+                    candidates=ordered,
+                    exclusions=list(exclusions),
                 )
             )
             return JSONResponse(
@@ -331,6 +340,8 @@ async def dispatch(
                 fallback=used_fallback,
                 identity=identity_name,
                 config_version=document.version,
+                candidates=ordered,
+                exclusions=list(exclusions),
             )
         )
         if isinstance(response_body, dict):
@@ -354,6 +365,8 @@ async def dispatch(
             fallback=False,
             identity=identity_name,
             config_version=document.version,
+            candidates=ordered,
+            exclusions=list(exclusions),
         )
     )
     return JSONResponse(

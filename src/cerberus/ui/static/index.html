@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<!-- Cerberus read-only admin dashboard. Window, not steering wheel:
+     this page renders state and NEVER mutates it - GET requests only.
+     No inline script or style: CSP (set by the server) allows 'self' assets only. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cerberus</title>
+<link rel="stylesheet" href="/admin/ui/app.css">
+</head>
+<body>
+<h1>Cerberus <small>read-only dashboard — configuration changes go through git + /admin API</small></h1>
+<div id="meta">loading…</div>
+<div class="grid">
+  <div>
+    <h2>Providers &amp; models</h2>
+    <table id="providers"><thead><tr><th>Provider</th><th>Credential</th><th>Model</th><th>Tier</th></tr></thead><tbody></tbody></table>
+    <h2>Active cooldowns</h2>
+    <table id="cooldowns"><thead><tr><th>Scope</th><th>Target</th><th>Reason</th><th>Remaining</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div>
+    <h2>Aliases</h2>
+    <table id="aliases"><thead><tr><th>Alias</th><th>Mode</th><th>Candidates (ordered)</th></tr></thead><tbody></tbody></table>
+    <h2>Identities</h2>
+    <table id="identities"><thead><tr><th>Identity</th><th>Modes</th><th>Aliases</th></tr></thead><tbody></tbody></table>
+  </div>
+</div>
+<h2>Recent routing events (newest first)</h2>
+<table id="events"><thead><tr><th>Outcome</th><th>Identity</th><th>Alias</th><th>Selected</th><th>Excl.</th><th>Latency</th><th>Config</th></tr></thead><tbody></tbody></table>
+<script src="/admin/ui/app.js"></script>
+</body>
+</html>

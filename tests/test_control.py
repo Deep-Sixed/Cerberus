@@ -231,5 +231,5 @@ async def test_shadow_records_a_miss_when_candidate_config_drops_the_alias(env, 
             await client.post("/admin/shadow", json={"path": shadow})
             await client.post("/v1/chat/completions", json={"model": "cerberus/free", "messages": []})
 
-    misses = [e for e in events if e["outcome"] == "shadow" and e["pool"] == "missing"]
+    misses = [e for e in events if e["outcome"] == "shadow" and e["mode"] == "missing"]
     assert len(misses) == 1 and misses[0]["model"] is None

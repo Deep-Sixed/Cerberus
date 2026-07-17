@@ -1,6 +1,8 @@
 """Best-effort, redacted routing telemetry output."""
 
 import asyncio
+import copy
+from collections import deque
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -15,7 +17,7 @@ from ..registry.schema import TelemetryConfig
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 AttemptOutcome = Literal[
     "missing_credentials",
     "transport_error",
@@ -43,9 +45,9 @@ class RoutingAttempt:
 @dataclass(frozen=True, slots=True)
 class RoutingEvent:
     request_id: str
-    request_type: str
+    alias: str
     provider: str | None
-    pool: str | None
+    mode: str | None
     model: str | None
     used_fallback: bool
     attempts: list[RoutingAttempt]
@@ -57,18 +59,26 @@ class RoutingEvent:
     streaming: bool
     identity: str | None = None
     config_version: str | None = None
+    credential: str | None = None
+    cost_tier: str | None = None
+    candidates: list[str] | None = None
+    exclusions: list[dict[str, Any]] | None = None
     schema_version: int = SCHEMA_VERSION
 
     def as_payload(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "request_id": self.request_id,
-            "request_type": self.request_type,
+            "alias": self.alias,
             "identity": self.identity,
             "config_version": self.config_version,
             "provider": self.provider,
-            "pool": self.pool,
+            "credential": self.credential,
+            "mode": self.mode,
             "model": self.model,
+            "cost_tier": self.cost_tier,
+            "candidates": self.candidates,
+            "exclusions": self.exclusions,
             "used_fallback": self.used_fallback,
             "attempt_count": len(self.attempts),
             "attempts": [asdict(attempt) for attempt in self.attempts],
@@ -90,7 +100,14 @@ class TelemetryEmitter:
         self,
         config: TelemetryConfig,
         transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        release_id: str,
+        recent_capacity: int = 50,
     ) -> None:
+        if not release_id:
+            raise ValueError("release_id must be a nonempty release identifier")
+        self._release_id = release_id
+        self._recent: deque[dict[str, Any]] = deque(maxlen=recent_capacity)
         self._endpoint = str(config.endpoint) if config.endpoint is not None else None
         self._token_file = Path(config.bearer_token_file) if config.bearer_token_file is not None else None
         self._timeout_seconds = config.timeout_seconds
@@ -120,11 +137,24 @@ class TelemetryEmitter:
         self._queue = asyncio.Queue(maxsize=self._queue_capacity)
         self._worker = asyncio.create_task(self._drain(), name="cerberus-telemetry")
 
+    def recent_events_snapshot(self) -> list[dict[str, Any]]:
+        """Newest-first deep-copied payloads for the read-only admin UI.
+
+        A copy, never the internal deque or its dicts: callers can mutate the
+        returned value without corrupting recorded events.
+        """
+
+        return copy.deepcopy(list(reversed(self._recent)))
+
     def emit(self, event: RoutingEvent) -> None:
+        # snapshot at emit time: later mutation of attempt/exclusion objects by
+        # the request path must not rewrite an already-recorded event
+        payload = copy.deepcopy({**event.as_payload(), "release_id": self._release_id})
+        self._recent.append(payload)
         if self._client is None or self._queue is None:
             return
         try:
-            self._queue.put_nowait(event.as_payload())
+            self._queue.put_nowait(payload)
         except asyncio.QueueFull:
             self._record_drop()
 
@@ -153,7 +183,7 @@ class TelemetryEmitter:
                 json=payload,
             )
             response.raise_for_status()
-        except OSError, UnicodeError, httpx.HTTPError:
+        except (OSError, UnicodeError, httpx.HTTPError):
             self._warn_delivery_failure()
             return
 
