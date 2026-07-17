@@ -61,11 +61,13 @@ function renderMeta(health, status) {
   const meta = document.getElementById("meta");
   meta.replaceChildren(
     el("span", "pill ok", text(health.status)),
-    " active: ",
+    " config: ",
     el("code", null, text(health.config_version)),
-    " (",
+    " (checksum ",
     el("code", null, text(health.config_checksum).slice(0, 18) + "…"),
-    ") · ",
+    ") · release: ",
+    el("code", null, text(status.release_id)),
+    " · ",
   );
   if (status.shadow) {
     meta.append("shadow: ", el("code", null, text(status.shadow.version)));
@@ -73,6 +75,8 @@ function renderMeta(health, status) {
     meta.append("no shadow armed");
   }
   meta.append(" · rollback depth " + text(status.rollback_depth));
+  const fusion = status.fusion ? status.fusion.state : "unknown";
+  meta.append(" · fusion: ", el("span", fusion === "healthy" ? "pill ok" : "pill warn", text(fusion)));
 }
 
 function renderError(err) {

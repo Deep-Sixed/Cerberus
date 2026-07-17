@@ -142,10 +142,9 @@ def create_app(
             return None
         return identity_for_client_id(config, client_id)
 
-    def authenticated(request: Request) -> bool:
-        token_env = boot_config.server.api_token_env
+    def token_matches(token_env: str | None, request: Request) -> bool:
         if token_env is None:
-            return True
+            return False
         expected = os.environ.get(token_env, "")
         supplied = request.headers.get("authorization", "").removeprefix("Bearer ")
         try:
@@ -153,6 +152,13 @@ def create_app(
         except TypeError:
             # non-ASCII header input is a bad credential, never a server error
             return False
+
+    def authenticated(request: Request) -> bool:
+        """Inference-surface gate: the api token, or open when none is configured."""
+
+        if boot_config.server.api_token_env is None:
+            return True
+        return token_matches(boot_config.server.api_token_env, request)
 
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:
@@ -180,20 +186,33 @@ def create_app(
 
         Read-only surface (dashboard, assets, events, status, active config):
         true loopback peers are always admitted — a local browser cannot attach
-        a bearer token — and remote peers need the configured admin token.
-        Mutating control-plane endpoints never get the loopback bypass once a
-        token is configured: local convenience must not grant config activation
-        without the admin credential.
+        a bearer token — and remote peers need the admin token (or, absent one,
+        the api token). Mutating control-plane endpoints require the DISTINCT
+        admin credential (server.admin_token_env); the inference api token
+        never authorizes mutation, and without an admin credential mutations
+        are loopback-only.
         """
 
-        token_configured = boot_config.server.api_token_env is not None
-        if is_loopback(request) and (read_only or not token_configured):
-            return None
-        if token_configured:
-            if not authenticated(request):
+        server = boot_config.server
+        if read_only:
+            if is_loopback(request):
+                return None
+            # remote read-only access needs the DISTINCT admin credential; the
+            # inference api token authorizes inference endpoints only
+            if token_matches(server.admin_token_env, request):
+                return None
+            if server.admin_token_env is not None:
                 return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
+            return JSONResponse(
+                status_code=403, content={"error": {"message": "Admin surface is loopback-only"}}
+            )
+        # mutations are loopback-only until a scoped Authentik admin flow
+        # exists; no bearer credential unlocks them remotely
+        if is_loopback(request):
             return None
-        return JSONResponse(status_code=403, content={"error": {"message": "Admin surface is loopback-only"}})
+        return JSONResponse(
+            status_code=403, content={"error": {"message": "Admin mutations are loopback-only"}}
+        )
 
     async def admin_body_path(request: Request) -> tuple[str | None, JSONResponse | None]:
         try:
@@ -209,7 +228,16 @@ def create_app(
 
     @app.get("/admin/status", response_model=None)
     async def admin_status(request: Request) -> dict[str, Any] | JSONResponse:
-        return admin_denied(request, read_only=True) or lifecycle.status()
+        denied = admin_denied(request, read_only=True)
+        if denied is not None:
+            return denied
+        return {
+            **lifecycle.status(),
+            "release_id": telemetry.release_id,
+            # SPEC §8: worker status belongs on the dashboard; truthful absence
+            # until Session 11 deploys the fusion worker — never fabricated health
+            "fusion": {"state": "not_configured"},
+        }
 
     @app.get("/admin/config/active", response_model=None)
     async def admin_config_active(request: Request) -> dict[str, Any] | JSONResponse:

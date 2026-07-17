@@ -17,7 +17,7 @@ from ..registry.schema import TelemetryConfig
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 AttemptOutcome = Literal[
     "missing_credentials",
     "transport_error",
@@ -40,6 +40,9 @@ class RoutingAttempt:
     outcome: AttemptOutcome
     latency_ms: float
     http_status: int | None = None
+    # the exact scope this attempt's failure applied to the cooldown store
+    # (e.g. "model" or "credential" on a 429); None when nothing was applied
+    cooldown_scope: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +122,7 @@ class TelemetryEmitter:
         )
         self._queue: asyncio.Queue[dict[str, Any]] | None = None
         self._worker: asyncio.Task[None] | None = None
+        self._in_flight = False
         self._dropped_events = 0
         self._last_drop_warning_at: float | None = None
         self._last_failure_warning_at: float | None = None
@@ -128,6 +132,10 @@ class TelemetryEmitter:
         """Number of events dropped because the bounded local queue was full."""
 
         return self._dropped_events
+
+    @property
+    def release_id(self) -> str:
+        return self._release_id
 
     async def start(self) -> None:
         """Start the single bounded delivery worker inside the application lifespan."""
@@ -162,11 +170,13 @@ class TelemetryEmitter:
         assert self._queue is not None
         while True:
             payload = await self._queue.get()
+            self._in_flight = True
             try:
                 await self._post(payload)
             except Exception:  # pragma: no cover - defensive worker boundary
                 self._warn_delivery_failure()
             finally:
+                self._in_flight = False
                 self._queue.task_done()
 
     async def _post(self, payload: dict[str, Any]) -> None:
@@ -187,8 +197,8 @@ class TelemetryEmitter:
             self._warn_delivery_failure()
             return
 
-    def _record_drop(self) -> None:
-        self._dropped_events += 1
+    def _record_drop(self, count: int = 1) -> None:
+        self._dropped_events += count
         now = time.monotonic()
         if self._last_drop_warning_at is None or now - self._last_drop_warning_at >= self._WARNING_INTERVAL_SECONDS:
             self._last_drop_warning_at = now
@@ -211,7 +221,10 @@ class TelemetryEmitter:
                     timeout=self._timeout_seconds + 0.5,
                 )
             except TimeoutError:
-                self._record_drop()
+                # exact discard count: everything still queued, plus the event
+                # mid-delivery whose worker is about to be cancelled. Events
+                # delivered before the timeout are never counted.
+                self._record_drop(self._queue.qsize() + (1 if self._in_flight else 0))
             self._worker.cancel()
             with suppress(asyncio.CancelledError):
                 await self._worker

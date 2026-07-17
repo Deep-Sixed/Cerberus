@@ -24,12 +24,18 @@ LOOPBACK_V6 = ("::1", 40001)
 REMOTE = ("203.0.113.9", 40001)
 
 
-def make_app(monkeypatch, tmp_path, *, token: str | None = None):
+def make_app(monkeypatch, tmp_path, *, token: str | None = None, admin_token: str | None = None):
     monkeypatch.setenv("ALPHA_KEY", "alpha-secret")
     raw = raw_config("cerberus-2026-07-16.1")
-    if token is not None:
-        monkeypatch.setenv("CERBERUS_API_TOKEN", token)
-        raw["server"] = {"host": "0.0.0.0", "port": 4000, "api_token_env": "CERBERUS_API_TOKEN"}
+    if token is not None or admin_token is not None:
+        server: dict = {"host": "0.0.0.0", "port": 4000}
+        if token is not None:
+            monkeypatch.setenv("CERBERUS_API_TOKEN", token)
+            server["api_token_env"] = "CERBERUS_API_TOKEN"
+        if admin_token is not None:
+            monkeypatch.setenv("CERBERUS_ADMIN_TOKEN", admin_token)
+            server["admin_token_env"] = "CERBERUS_ADMIN_TOKEN"
+        raw["server"] = server
     doc = load_config_document(write_config(tmp_path, "v1.yaml", raw))
     return create_app(doc, http_transport=httpx.MockTransport(ok_upstream))
 
@@ -161,43 +167,96 @@ async def test_forwarding_headers_cannot_impersonate_loopback(monkeypatch, tmp_p
                 assert response.status_code == 403, headers
 
 
+MUTATION_URLS = ("/admin/validate", "/admin/activate", "/admin/rollback", "/admin/shadow")
+INFER = {"model": "cerberus/free", "messages": []}
+
+
 @pytest.mark.asyncio
-async def test_token_mode_loopback_reads_dashboard_remote_needs_token(monkeypatch, tmp_path):
-    app = make_app(monkeypatch, tmp_path, token="admin-token")
+async def test_inference_token_authorizes_inference_only(monkeypatch, tmp_path):
+    """The inference api token must never grant admin access of any kind."""
+
+    app = make_app(monkeypatch, tmp_path, token="inference-token")
+    bearer = {"authorization": "Bearer inference-token"}
+    async with app.router.lifespan_context(app):
+        async with client_for(app, REMOTE) as remote:
+            # inference works with the inference token
+            assert (await remote.post("/v1/chat/completions", json=INFER, headers=bearer)).status_code == 200
+            assert (await remote.post("/v1/chat/completions", json=INFER)).status_code == 401
+            # ...but the same token gets no admin surface at all
+            for url in ADMIN_URLS:
+                assert (await remote.get(url, headers=bearer)).status_code in (401, 403), url
+            for url in MUTATION_URLS:
+                assert (await remote.post(url, json={}, headers=bearer)).status_code == 403, url
+
+
+@pytest.mark.asyncio
+async def test_loopback_reads_dashboard_even_in_token_mode(monkeypatch, tmp_path):
+    app = make_app(monkeypatch, tmp_path, token="inference-token", admin_token="admin-secret")
     async with app.router.lifespan_context(app):
         # a local browser cannot attach a bearer token: loopback reads the
-        # read-only surface directly even with a token configured
+        # read-only surface directly even with credentials configured
         for addr in (LOOPBACK, LOOPBACK_V6):
             async with client_for(app, addr) as local:
                 for url in ADMIN_URLS:
                     assert (await local.get(url)).status_code == 200, f"{addr} {url}"
-        # remote peers need the admin token
+
+
+@pytest.mark.asyncio
+async def test_remote_read_only_requires_the_distinct_admin_token(monkeypatch, tmp_path):
+    app = make_app(monkeypatch, tmp_path, token="inference-token", admin_token="admin-secret")
+    async with app.router.lifespan_context(app):
         async with client_for(app, REMOTE) as remote:
             assert (await remote.get("/admin/ui")).status_code == 401
             assert (
-                await remote.get("/admin/ui", headers={"authorization": "Bearer admin-token"})
+                await remote.get("/admin/ui", headers={"authorization": "Bearer admin-secret"})
             ).status_code == 200
+            # the inference token and wrong tokens are rejected
             assert (
-                await remote.get("/admin/events", headers={"authorization": "Bearer wrong-token"})
+                await remote.get("/admin/events", headers={"authorization": "Bearer inference-token"})
             ).status_code == 401
-            # forwarding headers still cannot impersonate loopback in token mode
+            assert (
+                await remote.get("/admin/events", headers={"authorization": "Bearer wrong"})
+            ).status_code == 401
+            # forwarding headers cannot impersonate loopback in token mode
             assert (
                 await remote.get("/admin/ui", headers={"x-forwarded-for": "127.0.0.1"})
             ).status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_token_mode_mutating_endpoints_get_no_loopback_bypass(monkeypatch, tmp_path):
-    app = make_app(monkeypatch, tmp_path, token="admin-token")
+async def test_mutations_are_loopback_only_for_every_credential(monkeypatch, tmp_path):
+    app = make_app(monkeypatch, tmp_path, token="inference-token", admin_token="admin-secret")
+    async with app.router.lifespan_context(app):
+        async with client_for(app, REMOTE) as remote:
+            for headers in (
+                {},
+                {"authorization": "Bearer inference-token"},
+                {"authorization": "Bearer admin-secret"},
+                {"x-forwarded-for": "127.0.0.1"},
+            ):
+                for url in MUTATION_URLS:
+                    assert (await remote.post(url, json={}, headers=headers)).status_code == 403, (url, headers)
+        # a true loopback peer reaches the mutation endpoints (auth passes;
+        # empty bodies then fail validation, not authorization)
+        async with client_for(app, LOOPBACK) as local:
+            assert (await local.post("/admin/validate", json={})).status_code == 400
+            assert (await local.post("/admin/rollback")).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_admin_status_reports_release_and_fusion_distinct_from_checksum(monkeypatch, tmp_path):
+    app = make_app(monkeypatch, tmp_path)
     async with app.router.lifespan_context(app):
         async with client_for(app, LOOPBACK) as local:
-            for url in ("/admin/validate", "/admin/activate", "/admin/rollback", "/admin/shadow"):
-                assert (await local.post(url, json={})).status_code == 401, url
-            # with the token, loopback mutation is allowed (and fails validation, not auth)
-            response = await local.post(
-                "/admin/validate", json={}, headers={"authorization": "Bearer admin-token"}
-            )
-            assert response.status_code == 400
+            status = (await local.get("/admin/status")).json()
+            health = (await local.get("/health")).json()
+            script = (await local.get("/admin/ui/app.js")).text
+
+    assert status["release_id"], "release_id must be exposed and nonempty"
+    assert status["release_id"] != health["config_checksum"], "release is not the config checksum"
+    assert status["fusion"] == {"state": "not_configured"}, "fusion state must be truthful, never omitted"
+    # the dashboard renders both as their own labeled values
+    assert "release_id" in script and "fusion" in script
 
 
 @pytest.mark.asyncio

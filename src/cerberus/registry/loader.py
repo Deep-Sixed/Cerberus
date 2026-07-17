@@ -35,6 +35,8 @@ def required_credential_envs(config: CerberusConfig) -> list[str]:
             names.add(identity.credential_env)
     if config.server.api_token_env:
         names.add(config.server.api_token_env)
+    if config.server.admin_token_env:
+        names.add(config.server.admin_token_env)
     return sorted(names)
 
 
@@ -42,6 +44,15 @@ def require_configured_credentials(config: CerberusConfig) -> None:
     missing = [name for name in required_credential_envs(config) if not os.environ.get(name, "").strip()]
     if missing:
         raise RuntimeError(f"Missing credential environment variables: {', '.join(missing)}")
+    server = config.server
+    if server.admin_token_env and server.api_token_env:
+        # real credential separation: two names resolving to one value would let
+        # the inference token pass admin checks. Compare values here; the error
+        # names only the environment variables, never their contents.
+        if os.environ.get(server.admin_token_env, "") == os.environ.get(server.api_token_env, ""):
+            raise RuntimeError(
+                f"{server.admin_token_env} and {server.api_token_env} must hold distinct credentials"
+            )
     token_file = config.telemetry.bearer_token_file
     if token_file is not None:
         path = Path(token_file)

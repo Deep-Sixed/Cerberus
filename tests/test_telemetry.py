@@ -5,6 +5,7 @@ request_type field carries the alias and pool carries the mode until the S8
 schema overhaul.
 """
 
+import asyncio
 import json
 import time
 from datetime import datetime, timezone
@@ -92,8 +93,10 @@ async def test_non_streaming_event_is_redacted_and_includes_usage(monkeypatch, t
     assert len(events) == 1
     assert events[0].headers["authorization"] == "Bearer telemetry-test-value"
     event = json.loads(events[0].content)
-    assert event["schema_version"] == 2
+    assert event["schema_version"] == 3
     assert event["alias"] == "cerberus/controlled"
+    assert event["attempts"][0]["used_fallback"] is False
+    assert event["attempts"][0]["cooldown_scope"] is None
     assert event["provider"] == "primary"
     assert event["mode"] == "dispatch"
     assert event["model"] == "primary-model"
@@ -166,8 +169,14 @@ async def test_forced_fallback_records_both_attempts(monkeypatch, tmp_path) -> N
     assert event["attempts"][0]["provider"] == "primary/main"
     assert event["attempts"][0]["outcome"] == "retryable_status"
     assert event["attempts"][0]["http_status"] == 429
+    # the first-choice attempt is not a fallback; the 429 recorded the exact applied scope
+    assert event["attempts"][0]["used_fallback"] is False
+    assert event["attempts"][0]["cooldown_scope"] == "model"
     assert event["attempts"][1]["provider"] == "secondary/main"
     assert event["attempts"][1]["outcome"] == "response"
+    # the successful second attempt is explicitly a fallback, agreeing with the event
+    assert event["attempts"][1]["used_fallback"] is True
+    assert event["attempts"][1]["cooldown_scope"] is None
 
 
 @pytest.mark.asyncio
@@ -450,3 +459,200 @@ async def test_event_config_version_binds_to_decision_time_config(monkeypatch, t
     event = events.json()["events"][0]
     assert event["config_version"] == "cerberus-2026-07-16.1"  # ...but the event kept A
     assert event["release_id"]
+
+
+# -- Codex repair pass: fallback flags, applied scope, shutdown accounting ----
+
+
+@pytest.mark.asyncio
+async def test_all_candidates_failing_marks_fallback_attempts(monkeypatch, tmp_path) -> None:
+    config = telemetry_config(monkeypatch, tmp_path)
+    events: list[dict] = []
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429)
+
+    async def telemetry(request: httpx.Request) -> httpx.Response:
+        events.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "event-id"})
+
+    app = create_app(config, httpx.MockTransport(upstream), httpx.MockTransport(telemetry))
+    response = await _request(app, {"model": "cerberus/controlled", "messages": []})
+
+    assert response.status_code == 503
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "routing_exhausted"
+    assert [a["used_fallback"] for a in event["attempts"]] == [False, True]
+    assert all(a["cooldown_scope"] == "model" for a in event["attempts"])
+
+
+@pytest.mark.asyncio
+async def test_streaming_fallback_attempt_is_marked(monkeypatch, tmp_path) -> None:
+    config = telemetry_config(monkeypatch, tmp_path)
+    events: list[dict] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "primary.example":
+            return httpx.Response(429)
+        content = b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=content)
+
+    async def telemetry(request: httpx.Request) -> httpx.Response:
+        events.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "event-id"})
+
+    app = create_app(config, httpx.MockTransport(upstream), httpx.MockTransport(telemetry))
+    response = await _request(app, {"model": "cerberus/controlled", "messages": [], "stream": True})
+
+    assert response.status_code == 200
+    assert len(events) == 1
+    event = events[0]
+    assert event["used_fallback"] is True
+    assert event["provider"] == "secondary"
+    assert event["attempts"][-1]["used_fallback"] is True
+    assert event["attempts"][-1]["outcome"] == "response"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_stream_after_fallback_keeps_fallback_flag(monkeypatch, tmp_path) -> None:
+    config = telemetry_config(monkeypatch, tmp_path)
+    events: list[dict] = []
+
+    class InterruptedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+            raise RuntimeError("controlled stream interruption")
+
+        async def aclose(self) -> None:
+            return None
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "primary.example":
+            return httpx.Response(429)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=InterruptedStream())
+
+    async def telemetry(request: httpx.Request) -> httpx.Response:
+        events.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "event-id"})
+
+    app = create_app(config, httpx.MockTransport(upstream), httpx.MockTransport(telemetry))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            with pytest.raises(RuntimeError, match="controlled stream interruption"):
+                await client.post(
+                    "/v1/chat/completions",
+                    json={"model": "cerberus/controlled", "messages": [], "stream": True},
+                )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "stream_interrupted"
+    assert event["used_fallback"] is True
+    assert event["attempts"][-1]["outcome"] == "stream_interrupted"
+    assert event["attempts"][-1]["used_fallback"] is True
+
+
+@pytest.mark.asyncio
+async def test_credential_scoped_429_records_credential_scope(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PRIMARY_KEY", "provider-test-value-primary")
+    token_file = tmp_path / "token"
+    token_file.write_text("telemetry-test-value", encoding="utf-8")
+    config = CerberusConfig.model_validate(
+        {
+            "metadata": {"version": "cerberus-2026-07-16.1"},
+            "telemetry": {
+                "endpoint": "http://contextforge.test/v1/telemetry/routing-records",
+                "bearer_token_file": str(token_file),
+                "timeout_seconds": 0.2,
+            },
+            "providers": {
+                "primary": {
+                    "base_url": "https://primary.example/v1",
+                    "quota_scope": "credential",
+                    "credentials": {"main": {"api_key_env": "PRIMARY_KEY"}},
+                    "models": {"primary-model": {"cost_tier": "free"}},
+                },
+            },
+            "aliases": {
+                "cerberus/controlled": {
+                    "mode": "dispatch",
+                    "candidates": [{"provider": "primary", "credential": "main", "model": "primary-model"}],
+                },
+            },
+        }
+    )
+    events: list[dict] = []
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429)
+
+    async def telemetry(request: httpx.Request) -> httpx.Response:
+        events.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "event-id"})
+
+    app = create_app(config, httpx.MockTransport(upstream), httpx.MockTransport(telemetry))
+    body = {"model": "cerberus/controlled", "messages": []}
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            first = await client.post("/v1/chat/completions", json=body)
+            second = await client.post("/v1/chat/completions", json=body)
+
+    assert first.status_code == 503 and second.status_code == 503
+    assert len(events) == 2
+    # the attempt records the exact scope the store received
+    attempt = events[0]["attempts"][0]
+    assert attempt["outcome"] == "retryable_status"
+    assert attempt["cooldown_scope"] == "credential"
+    # and the follow-up request is excluded by a cooldown with that same scope
+    exclusion = events[1]["exclusions"][0]
+    assert exclusion["reason"] == "cooldown_quota_429"
+    assert exclusion["scope"] == "credential"
+
+
+@pytest.mark.asyncio
+async def test_drain_timeout_counts_every_discarded_event(monkeypatch, tmp_path) -> None:
+    config = telemetry_config(monkeypatch, tmp_path)
+    entered = asyncio.Event()
+    blocker = asyncio.Event()  # never set: transport blocks forever
+
+    async def blocked_sink(_request: httpx.Request) -> httpx.Response:
+        entered.set()
+        await blocker.wait()
+        return httpx.Response(201)
+
+    emitter = TelemetryEmitter(config.telemetry, httpx.MockTransport(blocked_sink), release_id="test-release")
+    await emitter.start()
+    for index in range(3):
+        emitter.emit(_minimal_event(request_id=f"00000000-0000-4000-8000-00000000000{index}"))
+    await asyncio.wait_for(entered.wait(), timeout=2)  # worker holds event 0 in delivery
+    await emitter.close()
+
+    # one in-flight + two still queued: exactly three discarded, counted individually
+    assert emitter.dropped_events == 3
+
+
+@pytest.mark.asyncio
+async def test_events_delivered_before_drain_timeout_are_not_counted_dropped(monkeypatch, tmp_path) -> None:
+    config = telemetry_config(monkeypatch, tmp_path)
+    delivered: list[dict] = []
+    blocker = asyncio.Event()  # never set
+
+    async def sink(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if payload["request_id"].endswith("0"):
+            delivered.append(payload)
+            return httpx.Response(201)
+        await blocker.wait()
+        return httpx.Response(201)
+
+    emitter = TelemetryEmitter(config.telemetry, httpx.MockTransport(sink), release_id="test-release")
+    await emitter.start()
+    for index in range(3):
+        emitter.emit(_minimal_event(request_id=f"00000000-0000-4000-8000-00000000000{index}"))
+    while not delivered:
+        await asyncio.sleep(0.01)
+    await emitter.close()
+
+    assert len(delivered) == 1
+    assert emitter.dropped_events == 2  # event 1 in-flight + event 2 queued; event 0 delivered

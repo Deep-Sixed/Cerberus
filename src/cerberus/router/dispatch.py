@@ -29,15 +29,24 @@ from cerberus.state.cooldowns import InMemoryCooldownStore
 from cerberus.telemetry import RoutingAttempt, RoutingEvent, RoutingOutcome, TelemetryEmitter
 
 
-def _attempt(target: Target, outcome: str, started: float, http_status: int | None = None) -> RoutingAttempt:
+def _attempt(
+    target: Target,
+    outcome: str,
+    started: float,
+    http_status: int | None = None,
+    *,
+    fallback: bool,
+    cooldown_scope: str | None = None,
+) -> RoutingAttempt:
     return RoutingAttempt(
         provider=f"{target.provider_id}/{target.credential_id}",
         pool=target.model,
         model=target.model,
-        used_fallback=False,
+        used_fallback=fallback,
         outcome=outcome,  # type: ignore[arg-type]
         latency_ms=(time.perf_counter() - started) * 1000,
         http_status=http_status,
+        cooldown_scope=cooldown_scope,
     )
 
 
@@ -190,7 +199,7 @@ async def dispatch(
         attempt_started = time.perf_counter()
         if not api_key:
             exclusions.append({**target.describe(), "reason": "missing_credentials"})
-            attempts.append(_attempt(target, "missing_credentials", attempt_started))
+            attempts.append(_attempt(target, "missing_credentials", attempt_started, fallback=index > 0))
             continue
 
         attempted += 1
@@ -198,7 +207,9 @@ async def dispatch(
         try:
             response = await client.send(request, stream=streaming)
         except httpx.HTTPError:
-            attempts.append(_attempt(target, "transport_error", attempt_started))
+            attempts.append(
+                _attempt(target, "transport_error", attempt_started, fallback=index > 0, cooldown_scope="model")
+            )
             store.apply(
                 scope="model",
                 provider=target.provider_id,
@@ -210,7 +221,19 @@ async def dispatch(
             continue
 
         if response.status_code in RETRYABLE_STATUS_CODES:
-            attempts.append(_attempt(target, "retryable_status", attempt_started, response.status_code))
+            # a 429 applies target.quota_scope to the store; record that exact
+            # scope on the attempt so operators can see what was cooled down
+            applied_scope = target.quota_scope if response.status_code == 429 else None
+            attempts.append(
+                _attempt(
+                    target,
+                    "retryable_status",
+                    attempt_started,
+                    response.status_code,
+                    fallback=index > 0,
+                    cooldown_scope=applied_scope,
+                )
+            )
             if response.status_code == 429:
                 retry_after = retry_after_seconds(response)
                 duration = (
@@ -229,9 +252,9 @@ async def dispatch(
             await response.aclose()
             continue
 
-        final_attempt = _attempt(target, "response", attempt_started, response.status_code)
-        attempts.append(final_attempt)
         used_fallback = index > 0
+        final_attempt = _attempt(target, "response", attempt_started, response.status_code, fallback=used_fallback)
+        attempts.append(final_attempt)
         metadata = {
             "request_id": request_id,
             "alias": alias_name,

@@ -31,6 +31,15 @@ class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(default=4000, ge=1, le=65535)
     api_token_env: str | None = None
+    # distinct admin scope: the inference token must never authorize config
+    # mutation; without this, mutating admin endpoints are loopback-only
+    admin_token_env: str | None = None
+
+    @model_validator(mode="after")
+    def validate_credential_separation(self) -> "ServerConfig":
+        if self.admin_token_env is not None and self.admin_token_env == self.api_token_env:
+            raise ValueError("admin_token_env must name a different environment variable than api_token_env")
+        return self
 
 
 class TelemetryConfig(BaseModel):

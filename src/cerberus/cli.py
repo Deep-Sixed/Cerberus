@@ -21,4 +21,11 @@ def main() -> None:
             os.environ["CERBERUS_CONFIG"] = args.config
         document = load_config_document()
         server = document.config.server
-        uvicorn.run(create_app(document), host=server.host, port=server.port)
+        uvicorn.run(
+            create_app(document),
+            host=server.host,
+            port=server.port,
+            # never let X-Forwarded-For/Forwarded rewrite request.client:
+            # loopback admin authorization depends on the true transport peer
+            proxy_headers=False,
+        )
