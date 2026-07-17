@@ -50,6 +50,20 @@ class TelemetryConfig(BaseModel):
         return self
 
 
+class AuthentikConfig(BaseModel):
+    """Authentik is the sole token issuer; Cerberus only validates (asymmetric algs only)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    issuer: str = Field(min_length=1)
+    jwks_url: HttpUrl
+    audience: str = Field(min_length=1)
+    algorithms: list[Literal["RS256", "RS384", "RS512", "ES256", "ES384", "ES512"]] = Field(
+        default_factory=lambda: ["RS256", "ES256"], min_length=1
+    )
+    cache_ttl_seconds: int = Field(default=300, ge=10)
+
+
 class StateConfig(BaseModel):
     """Persistent runtime state location; null means in-memory (tests, dry runs)."""
 
@@ -137,16 +151,24 @@ class Identity(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    credential_env: str = Field(min_length=1)
+    credential_env: str | None = Field(default=None, min_length=1)
+    jwt_client_id: str | None = Field(default=None, min_length=1)
     allowed_modes: list[AliasMode] = Field(min_length=1)
     allowed_aliases: list[str] = Field(min_length=1)
     default_alias: str | None = None
+
+    @model_validator(mode="after")
+    def validate_credential_source(self) -> "Identity":
+        if (self.credential_env is None) == (self.jwt_client_id is None):
+            raise ValueError("identity requires exactly one of credential_env or jwt_client_id")
+        return self
 
 
 class CerberusConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     metadata: ConfigMetadata
+    authentik: AuthentikConfig | None = None
     server: ServerConfig = Field(default_factory=ServerConfig)
     state: StateConfig = Field(default_factory=StateConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
@@ -211,6 +233,10 @@ class CerberusConfig(BaseModel):
                     )
 
         for identity_name, identity in self.identities.items():
+            if identity.jwt_client_id is not None and self.authentik is None:
+                raise ValueError(
+                    f"identity {identity_name!r} uses jwt_client_id but no authentik block is configured"
+                )
             allowed_modes = set(identity.allowed_modes)
             for alias_name in identity.allowed_aliases:
                 alias = self.aliases.get(alias_name)

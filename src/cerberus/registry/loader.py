@@ -31,7 +31,8 @@ def required_credential_envs(config: CerberusConfig) -> list[str]:
         for credential in provider.credentials.values():
             names.add(credential.api_key_env)
     for identity in config.identities.values():
-        names.add(identity.credential_env)
+        if identity.credential_env is not None:
+            names.add(identity.credential_env)
     if config.server.api_token_env:
         names.add(config.server.api_token_env)
     return sorted(names)

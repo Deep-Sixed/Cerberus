@@ -41,6 +41,8 @@ def resolve_identity(config: CerberusConfig, request: Request) -> IdentityContex
     supplied_bytes = supplied.encode("utf-8", errors="replace")
     matched: IdentityContext | None = None
     for name, identity in config.identities.items():
+        if identity.credential_env is None:
+            continue
         expected = os.environ.get(identity.credential_env, "").strip()
         if not expected:
             continue
@@ -48,6 +50,13 @@ def resolve_identity(config: CerberusConfig, request: Request) -> IdentityContex
         if secrets.compare_digest(supplied_bytes, expected.encode("utf-8", errors="replace")):
             matched = IdentityContext(name=name, identity=identity)
     return matched
+
+
+def identity_for_client_id(config: CerberusConfig, client_id: str) -> IdentityContext | None:
+    for name, identity in config.identities.items():
+        if identity.jwt_client_id == client_id:
+            return IdentityContext(name=name, identity=identity)
+    return None
 
 
 def authorization_error(context: IdentityContext, alias_name: str, alias: Alias) -> str | None:

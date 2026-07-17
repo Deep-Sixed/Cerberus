@@ -16,7 +16,14 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
-from cerberus.identity import IdentityContext, authorization_error, resolve_identity
+from cerberus.identity import (
+    AuthentikVerifier,
+    IdentityContext,
+    authorization_error,
+    identity_for_client_id,
+    resolve_identity,
+    supplied_credential,
+)
 from cerberus.registry import CerberusConfig, ConfigDocument, load_config_document
 from cerberus.router.dispatch import dispatch, unauthorized_event
 from cerberus.state import InMemoryCooldownStore, SqliteCooldownStore
@@ -36,6 +43,7 @@ def create_app(
     config: CerberusConfig | ConfigDocument | None = None,
     http_transport: httpx.AsyncBaseTransport | None = None,
     telemetry_transport: httpx.AsyncBaseTransport | None = None,
+    jwks_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     if config is None:
         document = load_config_document()
@@ -57,15 +65,34 @@ def create_app(
         finally:
             await telemetry.close()
             await app.state.http_client.aclose()
+            if verifier is not None:
+                await verifier.aclose()
 
     app = FastAPI(title="Cerberus", version="0.1.0", lifespan=lifespan)
     app.state.document = document
     app.state.cooldowns = store
 
     identities_configured = bool(document.config.identities)
+    verifier = (
+        AuthentikVerifier(document.config.authentik, jwks_transport)
+        if document.config.authentik is not None
+        else None
+    )
 
-    def resolve(request: Request) -> IdentityContext | None:
-        return resolve_identity(document.config, request)
+    async def resolve(request: Request) -> IdentityContext | None:
+        static = resolve_identity(document.config, request)
+        if static is not None:
+            return static
+        if verifier is None:
+            return None
+        token = supplied_credential(request)
+        # a JWT has two dots; static keys never do — avoids verifier calls for cb- keys
+        if not token or token.count(".") != 2:
+            return None
+        client_id = await verifier.verify(token)
+        if client_id is None:
+            return None
+        return identity_for_client_id(document.config, client_id)
 
     def authenticated(request: Request) -> bool:
         token_env = document.config.server.api_token_env
@@ -96,7 +123,7 @@ def create_app(
     @app.get("/v1/models", response_model=None)
     async def models(request: Request) -> dict[str, Any] | JSONResponse:
         if identities_configured:
-            context = resolve(request)
+            context = await resolve(request)
             if context is None:
                 return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
             visible = [
@@ -119,7 +146,7 @@ def create_app(
     async def chat_completions(request: Request) -> JSONResponse | StreamingResponse:
         context: IdentityContext | None = None
         if identities_configured:
-            context = resolve(request)
+            context = await resolve(request)
             if context is None:
                 return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
         elif not authenticated(request):

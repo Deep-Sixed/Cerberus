@@ -12,6 +12,7 @@ dependencies = [
   "pydantic>=2.12,<3",
   "PyYAML>=6.0,<7",
   "uvicorn[standard]>=0.41,<1",
+  "pyjwt[crypto]>=2.10,<3",
 ]
 
 [build-system]
