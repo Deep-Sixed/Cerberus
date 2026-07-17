@@ -55,6 +55,7 @@ def _event(
     streaming: bool,
     fallback: bool,
     identity: str | None,
+    config_version: str | None = None,
 ) -> RoutingEvent:
     # S2 bridge onto the donor event shape: request_type carries the alias,
     # pool carries the mode. S8 replaces this with the unified Cerberus schema.
@@ -73,10 +74,13 @@ def _event(
         timestamp=datetime.now(timezone.utc),
         streaming=streaming,
         identity=identity,
+        config_version=config_version,
     )
 
 
-def unauthorized_event(*, alias_name: str, mode: str, identity: str | None) -> RoutingEvent:
+def unauthorized_event(
+    *, alias_name: str, mode: str, identity: str | None, config_version: str | None = None
+) -> RoutingEvent:
     return _event(
         request_id=str(uuid.uuid4()),
         alias=alias_name,
@@ -90,6 +94,61 @@ def unauthorized_event(*, alias_name: str, mode: str, identity: str | None) -> R
         streaming=False,
         fallback=False,
         identity=identity,
+        config_version=config_version,
+    )
+
+
+def shadow_decision_event(
+    *,
+    document: ConfigDocument,
+    alias_name: str,
+    store,
+    identity: str | None,
+) -> RoutingEvent | None:
+    """Policy-only evaluation of a candidate config. MUST NOT touch the network:
+    no http client is even reachable from here — keep it that way (SPEC test 9)."""
+    config = document.config
+    alias = config.aliases.get(alias_name)
+    if alias is None:
+        # the candidate config cannot serve this alias — record the miss
+        return _event(
+            request_id=str(uuid.uuid4()),
+            alias=alias_name,
+            mode="missing",
+            target=None,
+            attempts=[],
+            http_status=0,
+            outcome="shadow",
+            started_at=time.perf_counter(),
+            usage=None,
+            streaming=False,
+            fallback=False,
+            identity=identity,
+            config_version=document.version,
+        )
+    eligible, _exclusions = cost_eligible(alias, ordered_targets(config, alias_name))
+    selected: Target | None = None
+    for target in eligible:
+        if store.active_for(target.provider_id, target.credential_id, target.model) is not None:
+            continue
+        if not os.environ.get(target.api_key_env, "").strip():
+            continue
+        selected = target
+        break
+    return _event(
+        request_id=str(uuid.uuid4()),
+        alias=alias_name,
+        mode=alias.mode,
+        target=selected,
+        attempts=[],
+        http_status=0,
+        outcome="shadow",
+        started_at=time.perf_counter(),
+        usage=None,
+        streaming=False,
+        fallback=False,
+        identity=identity,
+        config_version=document.version,
     )
 
 
@@ -214,6 +273,7 @@ async def dispatch(
                             streaming=True,
                             fallback=used_fallback,
                             identity=identity_name,
+                            config_version=document.version,
                         )
                     )
 
@@ -248,6 +308,7 @@ async def dispatch(
                     streaming=False,
                     fallback=used_fallback,
                     identity=identity_name,
+                    config_version=document.version,
                 )
             )
             return JSONResponse(
@@ -269,6 +330,7 @@ async def dispatch(
                 streaming=False,
                 fallback=used_fallback,
                 identity=identity_name,
+                config_version=document.version,
             )
         )
         if isinstance(response_body, dict):
@@ -291,6 +353,7 @@ async def dispatch(
             streaming=streaming,
             fallback=False,
             identity=identity_name,
+            config_version=document.version,
         )
     )
     return JSONResponse(

@@ -1,7 +1,9 @@
 """Cerberus API — thin FastAPI surface over the policy core.
 
-Session 2 shape: server-token auth (identity records take over in S4),
-OpenAI-compatible ingress, one dispatch loop for every alias mode.
+Policy (providers, aliases, identities) hot-swaps through the config lifecycle;
+infrastructure bindings (server, telemetry sink, state backend, authentik
+issuer) are fixed at boot and change via restart — deliberately, so a config
+activation can never silently rebind the process's trust anchors.
 """
 
 from __future__ import annotations
@@ -15,7 +17,9 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from pydantic import ValidationError
 
+from cerberus.control import ConfigLifecycle
 from cerberus.identity import (
     AuthentikVerifier,
     IdentityContext,
@@ -25,7 +29,7 @@ from cerberus.identity import (
     supplied_credential,
 )
 from cerberus.registry import CerberusConfig, ConfigDocument, load_config_document
-from cerberus.router.dispatch import dispatch, unauthorized_event
+from cerberus.router.dispatch import dispatch, shadow_decision_event, unauthorized_event
 from cerberus.state import InMemoryCooldownStore, SqliteCooldownStore
 from cerberus.telemetry import TelemetryEmitter
 
@@ -52,9 +56,14 @@ def create_app(
     else:
         document = _document_for(config)
 
-    state_path = document.config.state.path
+    lifecycle = ConfigLifecycle(document)
+    boot_config = document.config  # infrastructure bindings: fixed at boot
+    state_path = boot_config.state.path
     store = SqliteCooldownStore(state_path) if state_path else InMemoryCooldownStore()
-    telemetry = TelemetryEmitter(document.config.telemetry, telemetry_transport)
+    telemetry = TelemetryEmitter(boot_config.telemetry, telemetry_transport)
+    verifier = (
+        AuthentikVerifier(boot_config.authentik, jwks_transport) if boot_config.authentik is not None else None
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -69,33 +78,26 @@ def create_app(
                 await verifier.aclose()
 
     app = FastAPI(title="Cerberus", version="0.1.0", lifespan=lifespan)
-    app.state.document = document
+    app.state.lifecycle = lifecycle
     app.state.cooldowns = store
 
-    identities_configured = bool(document.config.identities)
-    verifier = (
-        AuthentikVerifier(document.config.authentik, jwks_transport)
-        if document.config.authentik is not None
-        else None
-    )
-
-    async def resolve(request: Request) -> IdentityContext | None:
-        static = resolve_identity(document.config, request)
+    async def resolve(request: Request, config: CerberusConfig) -> IdentityContext | None:
+        static = resolve_identity(config, request)
         if static is not None:
             return static
         if verifier is None:
             return None
         token = supplied_credential(request)
-        # a JWT has two dots; static keys never do — avoids verifier calls for cb- keys
+        # a JWT has two dots; static cb- keys never do
         if not token or token.count(".") != 2:
             return None
         client_id = await verifier.verify(token)
         if client_id is None:
             return None
-        return identity_for_client_id(document.config, client_id)
+        return identity_for_client_id(config, client_id)
 
     def authenticated(request: Request) -> bool:
-        token_env = document.config.server.api_token_env
+        token_env = boot_config.server.api_token_env
         if token_env is None:
             return True
         expected = os.environ.get(token_env, "")
@@ -112,28 +114,112 @@ def create_app(
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
+        active = lifecycle.active
         return {
             "status": "ok",
             "service": "cerberus",
-            "config_version": document.version,
-            "config_checksum": document.checksum,
+            "config_version": active.version,
+            "config_checksum": active.checksum,
             "cooldowns": store.snapshot(),
         }
 
+    # -- admin surface (control plane) ------------------------------------
+
+    def admin_denied(request: Request) -> JSONResponse | None:
+        if not authenticated(request):
+            return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
+        return None
+
+    async def admin_body_path(request: Request) -> tuple[str | None, JSONResponse | None]:
+        try:
+            body = await request.json()
+        except json.JSONDecodeError, UnicodeDecodeError:
+            return None, JSONResponse(status_code=400, content={"error": {"message": "Invalid JSON body"}})
+        if not isinstance(body, dict):
+            return None, JSONResponse(status_code=400, content={"error": {"message": "JSON object body required"}})
+        path = body.get("path")
+        if path is not None and not isinstance(path, str):
+            return None, JSONResponse(status_code=400, content={"error": {"message": "path must be a string"}})
+        return path, None
+
+    @app.get("/admin/status", response_model=None)
+    async def admin_status(request: Request) -> dict[str, Any] | JSONResponse:
+        return admin_denied(request) or lifecycle.status()
+
+    @app.get("/admin/config/active", response_model=None)
+    async def admin_config_active(request: Request) -> dict[str, Any] | JSONResponse:
+        denied = admin_denied(request)
+        if denied is not None:
+            return denied
+        return lifecycle.active.config.model_dump(mode="json")
+
+    @app.post("/admin/validate")
+    async def admin_validate(request: Request) -> JSONResponse:
+        denied = admin_denied(request)
+        if denied is not None:
+            return denied
+        path, error = await admin_body_path(request)
+        if error is not None or path is None:
+            return error or JSONResponse(status_code=400, content={"error": {"message": "path is required"}})
+        try:
+            candidate = ConfigLifecycle.validate(path)
+        except (ValidationError, RuntimeError, OSError, ValueError) as exc:
+            return JSONResponse(status_code=422, content={"valid": False, "error": str(exc)})
+        return JSONResponse(content={"valid": True, "version": candidate.version, "checksum": candidate.checksum})
+
+    @app.post("/admin/activate")
+    async def admin_activate(request: Request) -> JSONResponse:
+        denied = admin_denied(request)
+        if denied is not None:
+            return denied
+        path, error = await admin_body_path(request)
+        if error is not None or path is None:
+            return error or JSONResponse(status_code=400, content={"error": {"message": "path is required"}})
+        try:
+            activated = lifecycle.activate(path)
+        except (ValidationError, RuntimeError, OSError, ValueError) as exc:
+            return JSONResponse(status_code=422, content={"activated": False, "error": str(exc)})
+        return JSONResponse(content={"activated": True, "active_version": activated.version})
+
+    @app.post("/admin/rollback")
+    async def admin_rollback(request: Request) -> JSONResponse:
+        denied = admin_denied(request)
+        if denied is not None:
+            return denied
+        try:
+            restored = lifecycle.rollback()
+        except LookupError as exc:
+            return JSONResponse(status_code=409, content={"error": {"message": str(exc)}})
+        return JSONResponse(content={"active_version": restored.version})
+
+    @app.post("/admin/shadow")
+    async def admin_shadow(request: Request) -> JSONResponse:
+        denied = admin_denied(request)
+        if denied is not None:
+            return denied
+        path, error = await admin_body_path(request)
+        if error is not None:
+            return error
+        try:
+            shadow = lifecycle.arm_shadow(path)
+        except (ValidationError, RuntimeError, OSError, ValueError) as exc:
+            return JSONResponse(status_code=422, content={"armed": False, "error": str(exc)})
+        return JSONResponse(content={"shadow_version": shadow.version if shadow else None})
+
+    # -- inference surface -------------------------------------------------
+
     @app.get("/v1/models", response_model=None)
     async def models(request: Request) -> dict[str, Any] | JSONResponse:
-        if identities_configured:
-            context = await resolve(request)
+        config = lifecycle.active.config
+        if config.identities:
+            context = await resolve(request, config)
             if context is None:
                 return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
-            visible = [
-                (alias_name, document.config.aliases[alias_name])
-                for alias_name in context.identity.allowed_aliases
-            ]
+            visible = [(name, config.aliases[name]) for name in context.identity.allowed_aliases]
         else:
             if not authenticated(request):
                 return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
-            visible = list(document.config.aliases.items())
+            visible = list(config.aliases.items())
         return {
             "object": "list",
             "data": [
@@ -144,9 +230,11 @@ def create_app(
 
     @app.post("/v1/chat/completions", response_model=None)
     async def chat_completions(request: Request) -> JSONResponse | StreamingResponse:
+        document = lifecycle.active
+        config = document.config
         context: IdentityContext | None = None
-        if identities_configured:
-            context = await resolve(request)
+        if config.identities:
+            context = await resolve(request, config)
             if context is None:
                 return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
         elif not authenticated(request):
@@ -160,22 +248,37 @@ def create_app(
         alias_name = body.get("model")
         if alias_name is None and context is not None and context.identity.default_alias:
             alias_name = context.identity.default_alias
-        if not isinstance(alias_name, str) or alias_name not in document.config.aliases:
+        if not isinstance(alias_name, str) or alias_name not in config.aliases:
             return JSONResponse(
                 status_code=404,
                 content={"error": {"message": f"Unknown alias {alias_name!r}; see /v1/models"}},
             )
-        alias = document.config.aliases[alias_name]
+        alias = config.aliases[alias_name]
         if context is not None:
             denial = authorization_error(context, alias_name, alias)
             if denial is not None:
                 telemetry.emit(
-                    unauthorized_event(alias_name=alias_name, mode=alias.mode, identity=context.name)
+                    unauthorized_event(
+                        alias_name=alias_name,
+                        mode=alias.mode,
+                        identity=context.name,
+                        config_version=document.version,
+                    )
                 )
                 return JSONResponse(
                     status_code=403,
                     content={"error": {"message": f"Identity not authorized for {alias_name!r}", "reason": denial}},
                 )
+        shadow = lifecycle.shadow
+        if shadow is not None:
+            shadow_event = shadow_decision_event(
+                document=shadow,
+                alias_name=alias_name,
+                store=store,
+                identity=context.name if context else None,
+            )
+            if shadow_event is not None:
+                telemetry.emit(shadow_event)
         return await dispatch(
             body=body,
             alias_name=alias_name,
