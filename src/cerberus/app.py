@@ -171,23 +171,29 @@ def create_app(
 
     # -- admin surface (control plane) ------------------------------------
 
-    def admin_denied(request: Request) -> JSONResponse | None:
+    def is_loopback(request: Request) -> bool:
+        # transport peer address only — forwarding headers are client-forgeable
+        return request.client is not None and request.client.host in _LOOPBACK_HOSTS
+
+    def admin_denied(request: Request, *, read_only: bool = False) -> JSONResponse | None:
         """Loopback-only or admin-scoped credential (PLAN Session 9).
 
-        With a server token configured, the token is the admin credential and
-        origin does not widen access. Without one, only loopback peers are
-        admitted — judged from the transport peer address, never from
-        forwarding headers, which any client can forge.
+        Read-only surface (dashboard, assets, events, status, active config):
+        true loopback peers are always admitted — a local browser cannot attach
+        a bearer token — and remote peers need the configured admin token.
+        Mutating control-plane endpoints never get the loopback bypass once a
+        token is configured: local convenience must not grant config activation
+        without the admin credential.
         """
 
-        if boot_config.server.api_token_env is not None:
+        token_configured = boot_config.server.api_token_env is not None
+        if is_loopback(request) and (read_only or not token_configured):
+            return None
+        if token_configured:
             if not authenticated(request):
                 return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
             return None
-        client_host = request.client.host if request.client is not None else None
-        if client_host not in _LOOPBACK_HOSTS:
-            return JSONResponse(status_code=403, content={"error": {"message": "Admin surface is loopback-only"}})
-        return None
+        return JSONResponse(status_code=403, content={"error": {"message": "Admin surface is loopback-only"}})
 
     async def admin_body_path(request: Request) -> tuple[str | None, JSONResponse | None]:
         try:
@@ -203,11 +209,11 @@ def create_app(
 
     @app.get("/admin/status", response_model=None)
     async def admin_status(request: Request) -> dict[str, Any] | JSONResponse:
-        return admin_denied(request) or lifecycle.status()
+        return admin_denied(request, read_only=True) or lifecycle.status()
 
     @app.get("/admin/config/active", response_model=None)
     async def admin_config_active(request: Request) -> dict[str, Any] | JSONResponse:
-        denied = admin_denied(request)
+        denied = admin_denied(request, read_only=True)
         if denied is not None:
             return denied
         return lifecycle.active.config.model_dump(mode="json")
@@ -267,13 +273,13 @@ def create_app(
 
     @app.get("/admin/events", include_in_schema=False, response_model=None)
     async def admin_events(request: Request) -> Response:
-        denied = admin_denied(request)
+        denied = admin_denied(request, read_only=True)
         if denied is not None:
             return denied
         return JSONResponse(content={"events": telemetry.recent_events_snapshot()}, headers=_ADMIN_UI_HEADERS)
 
     def serve_asset(request: Request, name: str) -> Response:
-        denied = admin_denied(request)
+        denied = admin_denied(request, read_only=True)
         if denied is not None:
             return denied
         media_type, body = admin_ui_assets[name]

@@ -162,10 +162,16 @@ async def test_forwarding_headers_cannot_impersonate_loopback(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_token_mode_requires_the_admin_token_from_any_origin(monkeypatch, tmp_path):
+async def test_token_mode_loopback_reads_dashboard_remote_needs_token(monkeypatch, tmp_path):
     app = make_app(monkeypatch, tmp_path, token="admin-token")
     async with app.router.lifespan_context(app):
-        # token is the admin credential: valid from remote, required even on loopback
+        # a local browser cannot attach a bearer token: loopback reads the
+        # read-only surface directly even with a token configured
+        for addr in (LOOPBACK, LOOPBACK_V6):
+            async with client_for(app, addr) as local:
+                for url in ADMIN_URLS:
+                    assert (await local.get(url)).status_code == 200, f"{addr} {url}"
+        # remote peers need the admin token
         async with client_for(app, REMOTE) as remote:
             assert (await remote.get("/admin/ui")).status_code == 401
             assert (
@@ -174,11 +180,37 @@ async def test_token_mode_requires_the_admin_token_from_any_origin(monkeypatch, 
             assert (
                 await remote.get("/admin/events", headers={"authorization": "Bearer wrong-token"})
             ).status_code == 401
-        async with client_for(app, LOOPBACK) as local:
-            assert (await local.get("/admin/events")).status_code == 401
+            # forwarding headers still cannot impersonate loopback in token mode
             assert (
-                await local.get("/admin/events", headers={"authorization": "Bearer admin-token"})
-            ).status_code == 200
+                await remote.get("/admin/ui", headers={"x-forwarded-for": "127.0.0.1"})
+            ).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_token_mode_mutating_endpoints_get_no_loopback_bypass(monkeypatch, tmp_path):
+    app = make_app(monkeypatch, tmp_path, token="admin-token")
+    async with app.router.lifespan_context(app):
+        async with client_for(app, LOOPBACK) as local:
+            for url in ("/admin/validate", "/admin/activate", "/admin/rollback", "/admin/shadow"):
+                assert (await local.post(url, json={})).status_code == 401, url
+            # with the token, loopback mutation is allowed (and fails validation, not auth)
+            response = await local.post(
+                "/admin/validate", json={}, headers={"authorization": "Bearer admin-token"}
+            )
+            assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_no_credential_is_embedded_in_dashboard_assets(monkeypatch, tmp_path):
+    monkeypatch.setenv("CERBERUS_API_TOKEN", "admin-token-secret-value")
+    app = make_app(monkeypatch, tmp_path, token="admin-token-secret-value")
+    async with app.router.lifespan_context(app):
+        async with client_for(app, LOOPBACK) as local:
+            for url in sorted(DASHBOARD_ASSET_URLS):
+                body = (await local.get(url)).text
+                assert "admin-token-secret-value" not in body, url
+                assert "authorization" not in body.lower(), url
+                assert "localstorage" not in body.lower() and "document.cookie" not in body.lower(), url
 
 
 # -- events endpoint ----------------------------------------------------------
