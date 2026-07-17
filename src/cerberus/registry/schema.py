@@ -50,6 +50,14 @@ class TelemetryConfig(BaseModel):
         return self
 
 
+class StateConfig(BaseModel):
+    """Persistent runtime state location; null means in-memory (tests, dry runs)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str | None = None
+
+
 class ModelEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -76,6 +84,9 @@ class ProviderEntry(BaseModel):
     models: dict[str, ModelEntry] = Field(min_length=1)
     quota_cooldown_seconds: int = Field(default=3600, ge=1)
     transport_cooldown_seconds: int = Field(default=30, ge=1)
+    # model: a 429 cools only the failing model; credential: account-wide
+    # exhaustion, one 429 cools every model under that credential
+    quota_scope: Literal["model", "credential"] = "model"
 
 
 class Candidate(BaseModel):
@@ -137,6 +148,7 @@ class CerberusConfig(BaseModel):
 
     metadata: ConfigMetadata
     server: ServerConfig = Field(default_factory=ServerConfig)
+    state: StateConfig = Field(default_factory=StateConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     providers: dict[str, ProviderEntry] = Field(min_length=1)
     aliases: dict[str, Alias] = Field(min_length=1)

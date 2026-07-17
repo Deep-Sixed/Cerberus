@@ -22,6 +22,7 @@ class Target:
     api_key_env: str
     quota_cooldown_seconds: int
     transport_cooldown_seconds: int
+    quota_scope: str
 
     def replace_cost_tier(self, cost_tier: CostTier) -> "Target":
         return replace(self, cost_tier=cost_tier)
@@ -47,6 +48,7 @@ def ordered_targets(config: CerberusConfig, alias_name: str) -> list[Target]:
                 api_key_env=provider.credentials[candidate.credential].api_key_env,
                 quota_cooldown_seconds=provider.quota_cooldown_seconds,
                 transport_cooldown_seconds=provider.transport_cooldown_seconds,
+                quota_scope=provider.quota_scope,
             )
         )
     return targets

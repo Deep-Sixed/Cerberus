@@ -134,12 +134,11 @@ async def dispatch(
                     if retry_after is not None
                     else target.quota_cooldown_seconds
                 )
-                # model scope by default; credential/provider escalation policy lands in S3
                 store.apply(
-                    scope="model",
+                    scope=target.quota_scope,  # model by default; credential = account-wide exhaustion
                     provider=target.provider_id,
                     credential=target.credential_id,
-                    model=target.model,
+                    model=target.model if target.quota_scope == "model" else None,
                     reason="quota_429",
                     duration_seconds=duration,
                 )

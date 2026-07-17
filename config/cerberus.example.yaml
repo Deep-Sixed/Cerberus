@@ -7,6 +7,9 @@ server:
   host: 127.0.0.1
   port: 4000
 
+state:
+  path: /var/lib/cerberus/cooldowns.db   # null -> in-memory (tests, dry runs)
+
 providers:
   openrouter:
     protocol: openai
@@ -26,6 +29,7 @@ providers:
       gemini-flash: { cost_tier: free, capabilities: [chat, tools] }
     quota_cooldown_seconds: 14400   # daily free-tier quota
     transport_cooldown_seconds: 30  # network blips never brick a provider for hours
+    quota_scope: model              # credential = one 429 cools every model on that key
 
 aliases:
   cerberus/free:

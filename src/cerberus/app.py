@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from cerberus.registry import CerberusConfig, ConfigDocument, load_config_document
 from cerberus.router.dispatch import dispatch
-from cerberus.state import InMemoryCooldownStore
+from cerberus.state import InMemoryCooldownStore, SqliteCooldownStore
 from cerberus.telemetry import TelemetryEmitter
 
 
@@ -43,7 +43,8 @@ def create_app(
     else:
         document = _document_for(config)
 
-    store = InMemoryCooldownStore()
+    state_path = document.config.state.path
+    store = SqliteCooldownStore(state_path) if state_path else InMemoryCooldownStore()
     telemetry = TelemetryEmitter(document.config.telemetry, telemetry_transport)
 
     @asynccontextmanager
