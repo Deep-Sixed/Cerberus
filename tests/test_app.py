@@ -141,7 +141,7 @@ async def test_unknown_alias_is_rejected_without_upstream_call(monkeypatch):
     response = await call(app, "POST", "/v1/chat/completions", json={"model": "gpt-4o", "messages": []})
 
     assert response.status_code == 404
-    assert "alias" in response.json()["error"]["message"]
+    assert "gpt-4o" in response.json()["error"]["message"]
     assert calls == 0
 
 
@@ -185,8 +185,13 @@ async def test_models_endpoint_lists_aliases(monkeypatch):
     assert response.status_code == 200
     data = response.json()["data"]
     ids = {entry["id"] for entry in data}
-    assert ids == {"cerberus/main", "cerberus/frugal"}
-    assert all(entry["owned_by"] == "cerberus" for entry in data)
+    # aliases plus directly-routable free provider models (paid beta-pro excluded)
+    assert {"cerberus/main", "cerberus/frugal"} <= ids
+    assert {"alpha/alpha-free", "beta/beta-free"} <= ids
+    assert "beta/beta-pro" not in ids
+    modes = {entry["id"]: entry["cerberus_mode"] for entry in data}
+    assert modes["cerberus/main"] == "dispatch"
+    assert modes["alpha/alpha-free"] == "direct"
 
 
 @pytest.mark.asyncio
@@ -216,3 +221,27 @@ async def test_external_bind_rejects_unauthenticated_requests(monkeypatch):
     assert unauthorized.status_code == 401
     assert authorized.status_code == 200
     assert non_ascii.status_code == 401  # never a 500 (v3 review finding)
+
+
+@pytest.mark.asyncio
+async def test_direct_free_provider_model_routes(monkeypatch):
+    """A raw provider/model id routes as an ad-hoc free request (rich-picker path)."""
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
+    response = await call(app, "POST", "/v1/chat/completions", json={"model": "alpha/alpha-free", "messages": []})
+    assert response.status_code == 200
+    meta = response.json()["cerberus"]
+    assert meta["provider"] == "alpha" and meta["model"] == "alpha-free" and meta["mode"] == "free"
+
+
+@pytest.mark.asyncio
+async def test_direct_paid_provider_model_is_rejected(monkeypatch):
+    """Free-only guarantee holds for direct routing: a paid provider model is not routable."""
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
+    response = await call(app, "POST", "/v1/chat/completions", json={"model": "beta/beta-pro", "messages": []})
+    assert response.status_code == 404  # paid model is not an exposed direct target

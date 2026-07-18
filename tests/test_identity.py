@@ -176,8 +176,11 @@ async def test_models_endpoint_is_scoped_to_the_identity(monkeypatch):
             coder = await client.get("/v1/models", headers={"x-api-key": "cb-coder-key"})
             anonymous = await client.get("/v1/models")
 
-    assert {m["id"] for m in recon.json()["data"]} == {"cerberus/free"}
-    assert {m["id"] for m in coder.json()["data"]} == {"cerberus/free", "cerberus/dispatch-code"}
+    # aliases are identity-scoped; both identities allow free mode, so both also
+    # see the directly-routable free provider models (rich picker, free-only).
+    direct = {"alpha/alpha-free", "alpha/alpha-code"}
+    assert {m["id"] for m in recon.json()["data"]} == {"cerberus/free"} | direct
+    assert {m["id"] for m in coder.json()["data"]} == {"cerberus/free", "cerberus/dispatch-code"} | direct
     assert anonymous.status_code == 401
 
 

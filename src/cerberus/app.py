@@ -32,6 +32,7 @@ from cerberus.identity import (
 )
 from cerberus.fusion import FusionWorkerClient, fusion_aliases, fusion_dispatch
 from cerberus.registry import CerberusConfig, ConfigDocument, load_config_document
+from cerberus.registry.schema import Alias, Candidate
 from cerberus.router.dispatch import dispatch, shadow_decision_event, unauthorized_event
 from cerberus.state import InMemoryCooldownStore, SqliteCooldownStore
 from cerberus.telemetry import TelemetryEmitter
@@ -69,6 +70,41 @@ _ADMIN_UI_HEADERS = {
 
 def _static_asset(name: str) -> str:
     return files("cerberus.ui").joinpath("static").joinpath(name).read_text(encoding="utf-8")
+
+
+def free_provider_models(config: CerberusConfig) -> list[dict[str, str]]:
+    """Every free provider model as a routable ``provider/model`` id.
+
+    Exposed alongside aliases so clients get a rich picker (operator choice);
+    direct calls to these are still free-only enforced. Paid models are omitted.
+    """
+
+    out: list[dict[str, str]] = []
+    for provider_name, provider in config.providers.items():
+        for model_name, model in provider.models.items():
+            if model.cost_tier == "free":
+                out.append({"id": f"{provider_name}/{model_name}", "provider": provider_name})
+    return out
+
+
+def resolve_direct_model(config: CerberusConfig, model_id: str) -> tuple[Alias, str] | None:
+    """Resolve a raw ``provider/model`` id into a synthetic single-candidate free
+    alias, or None if it is not a known free provider model. Splits on the first
+    '/', so models that themselves contain '/' (e.g. cloudflare @cf/...) work."""
+
+    provider_name, _, model_name = model_id.partition("/")
+    provider = config.providers.get(provider_name)
+    if provider is None or not model_name:
+        return None
+    model = provider.models.get(model_name)
+    if model is None or model.cost_tier != "free":
+        return None
+    credential = next(iter(provider.credentials))  # first credential
+    alias = Alias(
+        mode="free",
+        candidates=[Candidate(provider=provider_name, credential=credential, model=model_name)],
+    )
+    return alias, credential
 
 
 def _document_for(config: CerberusConfig) -> ConfigDocument:
@@ -343,17 +379,23 @@ def create_app(
             if context is None:
                 return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
             visible = [(name, config.aliases[name]) for name in context.identity.allowed_aliases]
+            allows_free = "free" in context.identity.allowed_modes
         else:
             if not authenticated(request):
                 return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
             visible = list(config.aliases.items())
-        return {
-            "object": "list",
-            "data": [
-                {"id": alias_name, "object": "model", "owned_by": "cerberus", "cerberus_mode": alias.mode}
-                for alias_name, alias in visible
-            ],
-        }
+            allows_free = True
+        data: list[dict[str, Any]] = [
+            {"id": alias_name, "object": "model", "owned_by": "cerberus", "cerberus_mode": alias.mode}
+            for alias_name, alias in visible
+        ]
+        if allows_free:
+            # rich picker: raw free provider models are directly routable (free-only)
+            data.extend(
+                {"id": m["id"], "object": "model", "owned_by": m["provider"], "cerberus_mode": "direct"}
+                for m in free_provider_models(config)
+            )
+        return {"object": "list", "data": data}
 
     @app.post("/v1/chat/completions", response_model=None)
     async def chat_completions(request: Request) -> JSONResponse | StreamingResponse:
@@ -375,27 +417,51 @@ def create_app(
         alias_name = body.get("model")
         if alias_name is None and context is not None and context.identity.default_alias:
             alias_name = context.identity.default_alias
-        if not isinstance(alias_name, str) or alias_name not in config.aliases:
+        # raw provider/model ids route as ad-hoc free requests when not a named alias
+        direct = resolve_direct_model(config, alias_name) if isinstance(alias_name, str) else None
+        if not isinstance(alias_name, str) or (alias_name not in config.aliases and direct is None):
             return JSONResponse(
                 status_code=404,
-                content={"error": {"message": f"Unknown alias {alias_name!r}; see /v1/models"}},
+                content={"error": {"message": f"Unknown model {alias_name!r}; see /v1/models"}},
             )
-        alias = config.aliases[alias_name]
-        if context is not None:
-            denial = authorization_error(context, alias_name, alias)
-            if denial is not None:
+        if direct is not None:
+            # direct free-model routing: identity need only allow free mode (this is
+            # the operator's chosen relaxation of the alias abstraction — free-only).
+            alias, _ = direct
+            if context is not None and "free" not in context.identity.allowed_modes:
                 telemetry.emit(
                     unauthorized_event(
-                        alias_name=alias_name,
-                        mode=alias.mode,
-                        identity=context.name,
-                        config_version=document.version,
+                        alias_name=alias_name, mode="free", identity=context.name, config_version=document.version
                     )
                 )
                 return JSONResponse(
                     status_code=403,
-                    content={"error": {"message": f"Identity not authorized for {alias_name!r}", "reason": denial}},
+                    content={"error": {"message": "Identity not authorized for free mode", "reason": "mode_not_allowed"}},
                 )
+            # register the synthetic alias so the shared routing path resolves it
+            synth_config = config.model_copy(update={"aliases": {**config.aliases, alias_name: alias}})
+            document = ConfigDocument(
+                config=synth_config, version=document.version, checksum=document.checksum,
+                source_path=document.source_path,
+            )
+            config = synth_config
+        else:
+            alias = config.aliases[alias_name]
+            if context is not None:
+                denial = authorization_error(context, alias_name, alias)
+                if denial is not None:
+                    telemetry.emit(
+                        unauthorized_event(
+                            alias_name=alias_name,
+                            mode=alias.mode,
+                            identity=context.name,
+                            config_version=document.version,
+                        )
+                    )
+                    return JSONResponse(
+                        status_code=403,
+                        content={"error": {"message": f"Identity not authorized for {alias_name!r}", "reason": denial}},
+                    )
         shadow = lifecycle.shadow
         if shadow is not None:
             shadow_event = shadow_decision_event(
