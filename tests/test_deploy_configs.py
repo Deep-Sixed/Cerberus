@@ -37,3 +37,13 @@ def test_free_alias_cannot_be_widened_to_a_paid_candidate(name):
     )
     with pytest.raises(ValidationError, match="free-mode but lists a paid candidate"):
         CerberusConfig.model_validate(raw)
+
+
+
+def test_fusion_dev_config_is_valid():
+    """The fusion bundle config validates and carries the worker binding + guard identity."""
+    doc = load_config_document(CONFIG_DIR / "fusion-dev.yaml", validate_credentials=False)
+    assert doc.config.fusion_worker.endpoint is not None
+    # the worker's own identity excludes fusion (recursion guard)
+    worker_identity = doc.config.identities["fusion-worker"]
+    assert "fusion" not in worker_identity.allowed_modes
