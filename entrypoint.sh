@@ -17,5 +17,7 @@ load_secret CB_KEY_DEV /run/secrets/cb_key_dev
 load_secret CB_KEY_WORKER /run/secrets/cb_key_worker
 load_secret CERBERUS_FUSION_WORKER_TOKEN /run/secrets/cerberus_fusion_worker_token
 load_secret OPENROUTER_API_KEY /run/secrets/openrouter_api_key
+load_secret GROQ_API_KEY /run/secrets/groq_api_key
+load_secret GEMINI_API_KEY /run/secrets/gemini_api_key
 
 exec "$@"
