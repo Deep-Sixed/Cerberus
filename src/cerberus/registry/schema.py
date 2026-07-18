@@ -93,6 +93,35 @@ class AuthentikConfig(BaseModel):
     cache_ttl_seconds: int = Field(default=300, ge=10)
 
 
+class AdminSSOConfig(BaseModel):
+    """Authentik OIDC login for the admin console (Authorization Code + PKCE).
+
+    Authentik is the sole authority: Cerberus starts the flow, validates the
+    id_token against Authentik's JWKS, and gates on an admin group claim. The
+    browser session is a Cerberus signed cookie (allowed — it is not an
+    externally-accepted MCP/API bearer). Break-glass is an Authentik-issued
+    admin-scoped bearer in the header, never a Cerberus-minted token.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    authorize_url: HttpUrl
+    token_url: HttpUrl
+    jwks_url: HttpUrl
+    issuer: str = Field(min_length=1)
+    client_id_env: str = Field(min_length=1)
+    client_secret_env: str = Field(min_length=1)
+    redirect_uri: HttpUrl
+    admin_groups: list[str] = Field(min_length=1)
+    session_secret_env: str = Field(min_length=1)
+    session_ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+    scopes: list[str] = Field(default_factory=lambda: ["openid", "profile", "email", "groups"])
+    ca_bundle: str | None = None  # path to trust Authentik's TLS cert; None = system trust
+    algorithms: list[Literal["RS256", "RS384", "RS512", "ES256", "ES384", "ES512"]] = Field(
+        default_factory=lambda: ["RS256", "ES256"], min_length=1
+    )
+
+
 class StateConfig(BaseModel):
     """Persistent runtime state location; null means in-memory (tests, dry runs)."""
 
@@ -201,6 +230,7 @@ class CerberusConfig(BaseModel):
 
     metadata: ConfigMetadata
     authentik: AuthentikConfig | None = None
+    admin_sso: AdminSSOConfig | None = None
     server: ServerConfig = Field(default_factory=ServerConfig)
     state: StateConfig = Field(default_factory=StateConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)

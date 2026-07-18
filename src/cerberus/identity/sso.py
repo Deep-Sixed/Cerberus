@@ -1,0 +1,220 @@
+"""Authentik OIDC login for the admin console — Authorization Code + PKCE + sessions.
+
+Authentik is the sole authority: Cerberus starts the flow, exchanges the code,
+validates the id_token against Authentik's JWKS (issuer + audience + nonce + exp),
+and gates on an admin group claim. The browser session is a Cerberus signed,
+HttpOnly/Secure/SameSite cookie holding only an opaque server-side session id —
+never a bearer token. Break-glass is an Authentik-issued admin-scoped bearer
+presented in the Authorization header, validated the same way; Cerberus never
+mints its own admin bearer.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import os
+import secrets
+import time
+from dataclasses import dataclass
+from urllib.parse import urlencode
+
+import httpx
+import jwt
+
+from cerberus.registry.schema import AdminSSOConfig
+
+_PENDING_TTL = 600.0  # seconds an unfinished login may stay open
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+@dataclass(slots=True)
+class AdminSession:
+    sub: str
+    email: str
+    name: str
+    groups: list[str]
+    expires: float
+
+
+class AdminSSO:
+    def __init__(self, config: AdminSSOConfig, transport: httpx.AsyncBaseTransport | None = None) -> None:
+        self._c = config
+        verify: str | bool = True
+        if transport is None and config.ca_bundle:
+            verify = config.ca_bundle
+        self._http = httpx.AsyncClient(transport=transport, timeout=8.0, verify=verify)
+        self._keys: dict[str, jwt.PyJWK] = {}
+        self._fetched = 0.0
+        self._sessions: dict[str, AdminSession] = {}
+        self._pending: dict[str, tuple[str, str, float]] = {}  # state -> (nonce, verifier, expires)
+
+    def _secret(self) -> bytes:
+        return os.environ.get(self._c.session_secret_env, "").encode()
+
+    def _client_id(self) -> str:
+        return os.environ.get(self._c.client_id_env, "")
+
+    # -- OIDC start -----------------------------------------------------------
+
+    def start_login(self) -> str:
+        """Return the Authentik authorize URL; stash state/nonce/PKCE server-side."""
+
+        state = secrets.token_urlsafe(24)
+        nonce = secrets.token_urlsafe(24)
+        verifier = secrets.token_urlsafe(48)
+        challenge = _b64url(hashlib.sha256(verifier.encode()).digest())
+        now = time.time()
+        self._pending = {s: v for s, v in self._pending.items() if v[2] > now}  # gc
+        self._pending[state] = (nonce, verifier, now + _PENDING_TTL)
+        params = {
+            "response_type": "code",
+            "client_id": self._client_id(),
+            "redirect_uri": str(self._c.redirect_uri),
+            "scope": " ".join(self._c.scopes),
+            "state": state,
+            "nonce": nonce,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+        return f"{str(self._c.authorize_url)}?{urlencode(params)}"
+
+    # -- OIDC callback --------------------------------------------------------
+
+    async def complete_login(self, code: str, state: str) -> AdminSession | None:
+        """Exchange the code, validate the id_token, gate on admin group. None on any failure."""
+
+        pending = self._pending.pop(state, None)  # single-use state
+        if pending is None:
+            return None
+        nonce, verifier, expires = pending
+        if time.time() > expires or not code:
+            return None
+        try:
+            resp = await self._http.post(
+                str(self._c.token_url),
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": str(self._c.redirect_uri),
+                    "client_id": self._client_id(),
+                    "client_secret": os.environ.get(self._c.client_secret_env, ""),
+                    "code_verifier": verifier,
+                },
+            )
+            resp.raise_for_status()
+            tokens = resp.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        id_token = tokens.get("id_token")
+        if not isinstance(id_token, str):
+            return None
+        claims = await self._validate(id_token, expected_nonce=nonce)
+        if claims is None or not self._is_admin(claims.get("groups")):
+            return None  # unauthenticated, or authenticated-but-not-admin
+        return AdminSession(
+            sub=str(claims.get("sub", "")),
+            email=str(claims.get("email", "")),
+            name=str(claims.get("name") or claims.get("preferred_username") or ""),
+            groups=list(claims.get("groups") or []),
+            expires=time.time() + self._c.session_ttl_seconds,
+        )
+
+    # -- break-glass (Authentik admin bearer in the header) -------------------
+
+    async def verify_break_glass(self, bearer: str) -> bool:
+        """True when the bearer is a valid Authentik admin-scoped token (JWKS + group)."""
+
+        claims = await self._validate(bearer, expected_nonce=None)
+        return claims is not None and self._is_admin(claims.get("groups"))
+
+    # -- id_token / bearer validation (JWKS, stale-if-error) ------------------
+
+    def _is_admin(self, groups: object) -> bool:
+        return isinstance(groups, list) and any(g in self._c.admin_groups for g in groups)
+
+    async def _refresh_keys(self) -> None:
+        resp = await self._http.get(str(self._c.jwks_url))
+        resp.raise_for_status()
+        keys: dict[str, jwt.PyJWK] = {}
+        for entry in resp.json().get("keys", []):
+            try:
+                key = jwt.PyJWK(entry)
+            except jwt.exceptions.PyJWKError:
+                continue
+            kid = entry.get("kid")
+            if kid and key.algorithm_name in self._c.algorithms:
+                keys[kid] = key
+        self._keys = keys
+        self._fetched = time.time()
+
+    async def _key_for(self, kid: str) -> jwt.PyJWK | None:
+        if kid not in self._keys or time.time() - self._fetched > 300:
+            try:
+                await self._refresh_keys()
+            except (httpx.HTTPError, ValueError):
+                pass
+        return self._keys.get(kid)
+
+    async def _validate(self, token: str, *, expected_nonce: str | None) -> dict | None:
+        try:
+            header = jwt.get_unverified_header(token)
+        except jwt.exceptions.InvalidTokenError:
+            return None
+        if header.get("alg") not in self._c.algorithms:
+            return None
+        kid = header.get("kid")
+        if not isinstance(kid, str):
+            return None
+        key = await self._key_for(kid)
+        if key is None:
+            return None
+        try:
+            claims = jwt.decode(
+                token,
+                key=key.key,
+                algorithms=list(self._c.algorithms),
+                audience=self._client_id(),
+                issuer=self._c.issuer,
+                options={"require": ["exp", "aud", "iss"]},
+            )
+        except jwt.exceptions.InvalidTokenError:
+            return None
+        if expected_nonce is not None and claims.get("nonce") != expected_nonce:
+            return None
+        return claims
+
+    # -- sessions + signed cookie --------------------------------------------
+
+    def create_session(self, session: AdminSession) -> str:
+        sid = secrets.token_urlsafe(32)
+        self._sessions[sid] = session
+        return sid
+
+    def cookie_value(self, sid: str) -> str:
+        sig = hmac.new(self._secret(), sid.encode(), hashlib.sha256).hexdigest()
+        return f"{sid}.{sig}"
+
+    def session_from_cookie(self, cookie: str | None) -> AdminSession | None:
+        if not cookie or "." not in cookie:
+            return None
+        sid, _, sig = cookie.rpartition(".")
+        expected = hmac.new(self._secret(), sid.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        session = self._sessions.get(sid)
+        if session is None or time.time() > session.expires:
+            self._sessions.pop(sid, None)
+            return None
+        return session
+
+    def logout(self, cookie: str | None) -> None:
+        if cookie and "." in cookie:
+            self._sessions.pop(cookie.rpartition(".")[0], None)
+
+    async def aclose(self) -> None:
+        await self._http.aclose()

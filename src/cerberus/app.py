@@ -32,11 +32,14 @@ from cerberus.identity import (
     supplied_credential,
 )
 from cerberus.fusion import FusionWorkerClient, fusion_aliases, fusion_dispatch
+from cerberus.identity.sso import AdminSSO
 from cerberus.registry import CerberusConfig, ConfigDocument, load_config_document
 from cerberus.registry.schema import Alias, Candidate
 from cerberus.router.dispatch import dispatch, shadow_decision_event, unauthorized_event
 from cerberus.state import InMemoryCooldownStore, SqliteCooldownStore
 from cerberus.telemetry import TelemetryEmitter
+
+SESSION_COOKIE = "cerberus_admin_session"
 
 
 def _release_id() -> str:
@@ -123,6 +126,7 @@ def create_app(
     telemetry_transport: httpx.AsyncBaseTransport | None = None,
     jwks_transport: httpx.AsyncBaseTransport | None = None,
     fusion_transport: httpx.AsyncBaseTransport | None = None,
+    sso_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     if config is None:
         document = load_config_document()
@@ -150,6 +154,7 @@ def create_app(
         AuthentikVerifier(boot_config.authentik, jwks_transport) if boot_config.authentik is not None else None
     )
     fusion_worker = FusionWorkerClient(boot_config.fusion_worker, fusion_transport)
+    admin_sso = AdminSSO(boot_config.admin_sso, sso_transport) if boot_config.admin_sso is not None else None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -163,6 +168,8 @@ def create_app(
             await fusion_worker.aclose()
             if verifier is not None:
                 await verifier.aclose()
+            if admin_sso is not None:
+                await admin_sso.aclose()
 
     app = FastAPI(title="Cerberus", version="0.1.0", lifespan=lifespan)
     app.state.lifecycle = lifecycle
@@ -202,7 +209,11 @@ def create_app(
         return token_matches(boot_config.server.api_token_env, request)
 
     @app.get("/", include_in_schema=False)
-    async def root() -> RedirectResponse:
+    async def root(request: Request) -> RedirectResponse:
+        # with SSO configured, land on the console when signed in, else the login
+        if admin_sso is not None:
+            session = admin_sso.session_from_cookie(request.cookies.get(SESSION_COOKIE))
+            return RedirectResponse(url="/admin/ui" if session is not None else "/admin/login")
         return RedirectResponse(url="/docs")
 
     @app.get("/health")
@@ -255,6 +266,69 @@ def create_app(
             status_code=403, content={"error": {"message": "Admin mutations are loopback-only"}}
         )
 
+    async def admin_gate(request: Request, *, read_only: bool = False) -> JSONResponse | None:
+        """Admin authorization. When SSO is configured: a valid Authentik-backed
+        browser session (signed cookie), an Authentik admin-scoped break-glass
+        bearer, or a true loopback peer authorizes; anything else gets 401 to
+        prompt the OIDC login. Without SSO, the loopback/token rules apply."""
+
+        if admin_sso is not None:
+            if admin_sso.session_from_cookie(request.cookies.get(SESSION_COOKIE)) is not None:
+                return None
+            bearer = request.headers.get("authorization", "").removeprefix("Bearer ")
+            # a JWT has two dots; the static admin token never does
+            if bearer.count(".") == 2 and await admin_sso.verify_break_glass(bearer):
+                return None
+            if is_loopback(request):
+                return None
+            return JSONResponse(status_code=401, content={"error": {"message": "Authentication required — /admin/login"}})
+        return admin_denied(request, read_only=read_only)
+
+    # -- Authentik OIDC login for the console -----------------------------
+
+    @app.get("/admin/login", include_in_schema=False, response_model=None)
+    async def admin_login(request: Request) -> Response:
+        if admin_sso is None:
+            return JSONResponse(status_code=404, content={"error": {"message": "SSO not configured"}})
+        if admin_sso.session_from_cookie(request.cookies.get(SESSION_COOKIE)) is not None:
+            return RedirectResponse(url="/admin/ui")
+        return Response(
+            content=_static_asset("login.html"), media_type="text/html; charset=utf-8",
+            headers=_ADMIN_UI_HEADERS,
+        )
+
+    @app.get("/admin/login/start", include_in_schema=False, response_model=None)
+    async def admin_login_start() -> Response:
+        if admin_sso is None:
+            return JSONResponse(status_code=404, content={"error": {"message": "SSO not configured"}})
+        return RedirectResponse(url=admin_sso.start_login(), status_code=302)
+
+    @app.get("/admin/callback", include_in_schema=False, response_model=None)
+    async def admin_callback(request: Request) -> Response:
+        if admin_sso is None:
+            return JSONResponse(status_code=404, content={"error": {"message": "SSO not configured"}})
+        code = request.query_params.get("code", "")
+        state = request.query_params.get("state", "")
+        session = await admin_sso.complete_login(code, state)
+        if session is None:
+            return JSONResponse(status_code=403, content={"error": {"message": "SSO login failed or not an admin"}})
+        sid = admin_sso.create_session(session)
+        resp = RedirectResponse(url="/admin/ui", status_code=302)
+        resp.set_cookie(
+            SESSION_COOKIE, admin_sso.cookie_value(sid),
+            max_age=boot_config.admin_sso.session_ttl_seconds if boot_config.admin_sso else 3600,
+            httponly=True, secure=True, samesite="lax", path="/",
+        )
+        return resp
+
+    @app.get("/admin/logout", include_in_schema=False, response_model=None)
+    async def admin_logout(request: Request) -> Response:
+        if admin_sso is not None:
+            admin_sso.logout(request.cookies.get(SESSION_COOKIE))
+        resp = RedirectResponse(url="/admin/login", status_code=302)
+        resp.delete_cookie(SESSION_COOKIE, path="/")
+        return resp
+
     async def admin_body_path(request: Request) -> tuple[str | None, JSONResponse | None]:
         try:
             body = await request.json()
@@ -269,7 +343,7 @@ def create_app(
 
     @app.get("/admin/status", response_model=None)
     async def admin_status(request: Request) -> dict[str, Any] | JSONResponse:
-        denied = admin_denied(request, read_only=True)
+        denied = await admin_gate(request, read_only=True)
         if denied is not None:
             return denied
         return {
@@ -286,14 +360,14 @@ def create_app(
 
     @app.get("/admin/config/active", response_model=None)
     async def admin_config_active(request: Request) -> dict[str, Any] | JSONResponse:
-        denied = admin_denied(request, read_only=True)
+        denied = await admin_gate(request, read_only=True)
         if denied is not None:
             return denied
         return lifecycle.active.config.model_dump(mode="json")
 
     @app.post("/admin/validate")
     async def admin_validate(request: Request) -> JSONResponse:
-        denied = admin_denied(request)
+        denied = await admin_gate(request)
         if denied is not None:
             return denied
         path, error = await admin_body_path(request)
@@ -307,7 +381,7 @@ def create_app(
 
     @app.post("/admin/activate")
     async def admin_activate(request: Request) -> JSONResponse:
-        denied = admin_denied(request)
+        denied = await admin_gate(request)
         if denied is not None:
             return denied
         path, error = await admin_body_path(request)
@@ -321,7 +395,7 @@ def create_app(
 
     @app.post("/admin/rollback")
     async def admin_rollback(request: Request) -> JSONResponse:
-        denied = admin_denied(request)
+        denied = await admin_gate(request)
         if denied is not None:
             return denied
         try:
@@ -332,7 +406,7 @@ def create_app(
 
     @app.post("/admin/shadow")
     async def admin_shadow(request: Request) -> JSONResponse:
-        denied = admin_denied(request)
+        denied = await admin_gate(request)
         if denied is not None:
             return denied
         path, error = await admin_body_path(request)
@@ -346,14 +420,14 @@ def create_app(
 
     @app.get("/admin/events", include_in_schema=False, response_model=None)
     async def admin_events(request: Request) -> Response:
-        denied = admin_denied(request, read_only=True)
+        denied = await admin_gate(request, read_only=True)
         if denied is not None:
             return denied
         return JSONResponse(content={"events": telemetry.recent_events_snapshot()}, headers=_ADMIN_UI_HEADERS)
 
     @app.get("/admin/providers", include_in_schema=False, response_model=None)
     async def admin_providers(request: Request) -> Response:
-        denied = admin_denied(request, read_only=True)
+        denied = await admin_gate(request, read_only=True)
         if denied is not None:
             return denied
         config = lifecycle.active.config
@@ -379,7 +453,7 @@ def create_app(
     @app.get("/admin/providers/{name}/test", include_in_schema=False, response_model=None)
     async def admin_provider_test(name: str, request: Request) -> Response:
         # loopback/admin live probe: GET the provider's /models with its key.
-        denied = admin_denied(request, read_only=True)
+        denied = await admin_gate(request, read_only=True)
         if denied is not None:
             return denied
         config = lifecycle.active.config
@@ -409,8 +483,8 @@ def create_app(
                 content={"ok": False, "reason": type(exc).__name__}, headers=_ADMIN_UI_HEADERS
             )
 
-    def serve_asset(request: Request, name: str) -> Response:
-        denied = admin_denied(request, read_only=True)
+    async def serve_asset(request: Request, name: str) -> Response:
+        denied = await admin_gate(request, read_only=True)
         if denied is not None:
             return denied
         media_type, body = admin_ui_assets[name]
@@ -418,15 +492,15 @@ def create_app(
 
     @app.get("/admin/ui", include_in_schema=False, response_model=None)
     async def admin_ui(request: Request) -> Response:
-        return serve_asset(request, "index.html")
+        return await serve_asset(request, "index.html")
 
     @app.get("/admin/ui/app.css", include_in_schema=False, response_model=None)
     async def admin_ui_css(request: Request) -> Response:
-        return serve_asset(request, "app.css")
+        return await serve_asset(request, "app.css")
 
     @app.get("/admin/ui/app.js", include_in_schema=False, response_model=None)
     async def admin_ui_js(request: Request) -> Response:
-        return serve_asset(request, "app.js")
+        return await serve_asset(request, "app.js")
 
     # -- inference surface -------------------------------------------------
 
