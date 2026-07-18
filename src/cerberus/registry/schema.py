@@ -59,6 +59,26 @@ class TelemetryConfig(BaseModel):
         return self
 
 
+class FusionWorkerConfig(BaseModel):
+    """Bundled fusion worker binding — fixed at boot, like the telemetry sink.
+
+    The worker executes panel+judge; Cerberus holds the policy and fans out to it.
+    Absent this block, fusion-mode aliases have nowhere to run and fail closed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: HttpUrl | None = None
+    bearer_token_env: str | None = None
+    connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+
+    @model_validator(mode="after")
+    def validate_worker(self) -> "FusionWorkerConfig":
+        if (self.endpoint is None) != (self.bearer_token_env is None):
+            raise ValueError("fusion_worker endpoint and bearer_token_env must be configured together")
+        return self
+
+
 class AuthentikConfig(BaseModel):
     """Authentik is the sole token issuer; Cerberus only validates (asymmetric algs only)."""
 
@@ -119,6 +139,9 @@ class Candidate(BaseModel):
     credential: str = Field(min_length=1)
     model: str = Field(min_length=1)
     cost_tier: CostTier | None = None  # optional restatement; verified against the registry
+    # fusion panels only: a per-seat system prompt (the member's assigned stance).
+    # Ignored outside a fusion alias's candidate/judge list.
+    role: str | None = Field(default=None, min_length=1)
 
     def key(self) -> tuple[str, str, str]:
         return (self.provider, self.credential, self.model)
@@ -181,6 +204,7 @@ class CerberusConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     state: StateConfig = Field(default_factory=StateConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    fusion_worker: FusionWorkerConfig = Field(default_factory=FusionWorkerConfig)
     providers: dict[str, ProviderEntry] = Field(min_length=1)
     aliases: dict[str, Alias] = Field(min_length=1)
     identities: dict[str, Identity] = Field(default_factory=dict)

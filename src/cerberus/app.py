@@ -30,6 +30,7 @@ from cerberus.identity import (
     resolve_identity,
     supplied_credential,
 )
+from cerberus.fusion import FusionWorkerClient, fusion_aliases, fusion_dispatch
 from cerberus.registry import CerberusConfig, ConfigDocument, load_config_document
 from cerberus.router.dispatch import dispatch, shadow_decision_event, unauthorized_event
 from cerberus.state import InMemoryCooldownStore, SqliteCooldownStore
@@ -84,6 +85,7 @@ def create_app(
     http_transport: httpx.AsyncBaseTransport | None = None,
     telemetry_transport: httpx.AsyncBaseTransport | None = None,
     jwks_transport: httpx.AsyncBaseTransport | None = None,
+    fusion_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     if config is None:
         document = load_config_document()
@@ -110,6 +112,7 @@ def create_app(
     verifier = (
         AuthentikVerifier(boot_config.authentik, jwks_transport) if boot_config.authentik is not None else None
     )
+    fusion_worker = FusionWorkerClient(boot_config.fusion_worker, fusion_transport)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -120,6 +123,7 @@ def create_app(
         finally:
             await telemetry.close()
             await app.state.http_client.aclose()
+            await fusion_worker.aclose()
             if verifier is not None:
                 await verifier.aclose()
 
@@ -234,9 +238,13 @@ def create_app(
         return {
             **lifecycle.status(),
             "release_id": telemetry.release_id,
-            # SPEC §8: worker status belongs on the dashboard; truthful absence
-            # until Session 11 deploys the fusion worker — never fabricated health
-            "fusion": {"state": "not_configured"},
+            # SPEC §8: worker status on the dashboard. "configured" means the
+            # binding is present (a fusion request will reach the worker); we do
+            # not probe worker health from this read-only endpoint.
+            "fusion": {
+                "state": "configured" if fusion_worker.configured else "not_configured",
+                "aliases": fusion_aliases(boot_config),
+            },
         }
 
     @app.get("/admin/config/active", response_model=None)
@@ -398,6 +406,18 @@ def create_app(
             )
             if shadow_event is not None:
                 telemetry.emit(shadow_event)
+        if alias.mode == "fusion":
+            # fusion-mode aliases fan out to the bundled worker; a worker outage
+            # fails only fusion aliases, never dispatch/free (fail closed).
+            return await fusion_dispatch(
+                body=body,
+                alias_name=alias_name,
+                alias=alias,
+                identity_name=context.name if context else None,
+                document=document,
+                worker=fusion_worker,
+                telemetry=telemetry,
+            )
         return await dispatch(
             body=body,
             alias_name=alias_name,

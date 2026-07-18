@@ -27,7 +27,13 @@ AttemptOutcome = Literal[
     "stream_interrupted",
 ]
 RoutingOutcome = Literal[
-    "success", "upstream_error", "routing_exhausted", "stream_interrupted", "unauthorized", "shadow"
+    "success",
+    "upstream_error",
+    "routing_exhausted",
+    "stream_interrupted",
+    "unauthorized",
+    "shadow",
+    "fusion_unavailable",  # bundled worker unreachable — fusion aliases fail closed
 ]
 
 
