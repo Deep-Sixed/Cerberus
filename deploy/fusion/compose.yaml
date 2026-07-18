@@ -1,0 +1,58 @@
+# Cerberus fusion bundle — ONE compose project, ONE deployment.
+# Only cerberus-api publishes a port (loopback). The worker sits on the internal
+# network with no published port: unreachable from the host by construction.
+#
+# Worker runtime config is GENERATED from the Cerberus fusion alias:
+#   cerberus fusion-config --config config/fusion-dev.yaml --out worker.generated.yaml
+# Cerberus stays the single configuration authority (SPEC §9).
+name: cerberus-fusion
+
+networks:
+  internal:
+    driver: bridge
+
+services:
+  cerberus-api:
+    image: cerberus-dev:latest
+    restart: unless-stopped
+    networks: [internal]
+    ports:
+      - "127.0.0.1:4102:4101"     # host publish is loopback-only
+    environment:
+      CERBERUS_CONFIG: /etc/cerberus/config.yaml
+      CERBERUS_RELEASE_ID: ${CERBERUS_RELEASE_ID:-dev-fusion}
+    volumes:
+      - ${CERBERUS_CONFIG_FILE}:/etc/cerberus/config.yaml:ro
+      - ${SECRETS_DIR}/cerberus_api_token:/run/secrets/cerberus_api_token:ro
+      - ${SECRETS_DIR}/cerberus_admin_token:/run/secrets/cerberus_admin_token:ro
+      - ${SECRETS_DIR}/cb_key_dev:/run/secrets/cb_key_dev:ro
+      - ${SECRETS_DIR}/cb_key_worker:/run/secrets/cb_key_worker:ro
+      - ${SECRETS_DIR}/openrouter_api_key:/run/secrets/openrouter_api_key:ro
+      - ${SECRETS_DIR}/cerberus_fusion_worker_token:/run/secrets/cerberus_fusion_worker_token:ro
+      - cerberus-fusion-state:/var/lib/cerberus
+    depends_on: [cerberus-fusion-worker]
+
+  cerberus-fusion-worker:
+    image: cerberus-fusion-worker:dev
+    restart: unless-stopped
+    networks: [internal]
+    # NO ports: — the worker is internal-only, unreachable from the host.
+    environment:
+      FUSION_BACKEND_CONFIG: /etc/fusion_backend/worker.yaml
+      FUSION_BACKEND_PORT: "8000"
+      FUSION_BACKEND_NO_OPEN: "1"
+      OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_api_key
+    entrypoint: ["/bin/sh", "-c"]
+    # resolve the file-mounted secrets into the env refs the generated config uses
+    command:
+      - |
+        export OPENROUTER_API_KEY="$(cat /run/secrets/openrouter_api_key)"
+        export CERBERUS_FUSION_WORKER_TOKEN="$(cat /run/secrets/cerberus_fusion_worker_token)"
+        exec fusion_backend serve --host 0.0.0.0 --port 8000
+    volumes:
+      - ${WORKER_CONFIG_FILE}:/etc/fusion_backend/worker.yaml:ro
+      - ${SECRETS_DIR}/openrouter_api_key:/run/secrets/openrouter_api_key:ro
+      - ${SECRETS_DIR}/cerberus_fusion_worker_token:/run/secrets/cerberus_fusion_worker_token:ro
+
+volumes:
+  cerberus-fusion-state:

@@ -1,0 +1,68 @@
+# Cerberus fusion bundle config (cerberus-api side).
+# Adds a fusion alias + the bundled-worker binding to the dev slice. The worker
+# endpoint is the compose service name on the internal network; only cerberus-api
+# publishes a port. Secrets are env-var NAMES resolved by the entrypoint bridge.
+metadata:
+  version: cerberus-2026-07-17.3
+
+server:
+  host: 0.0.0.0
+  port: 4101
+  api_token_env: CERBERUS_API_TOKEN
+  admin_token_env: CERBERUS_ADMIN_TOKEN
+
+state:
+  path: /var/lib/cerberus/cooldowns.sqlite3
+
+telemetry: {}
+
+fusion_worker:
+  endpoint: http://cerberus-fusion-worker:8000   # internal compose DNS; no host port
+  bearer_token_env: CERBERUS_FUSION_WORKER_TOKEN
+
+providers:
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    credentials:
+      main: { api_key_env: OPENROUTER_API_KEY }
+    models:
+      google/gemma-4-26b-a4b-it:free: { cost_tier: free, capabilities: [chat] }
+      qwen/qwen3-coder:free: { cost_tier: free, capabilities: [chat, coding] }
+
+identities:
+  # human/agent caller: may use dispatch + fusion
+  dev:
+    credential_env: CB_KEY_DEV
+    allowed_modes: [dispatch, fusion]
+    allowed_aliases: [cerberus/dispatch-dev, cerberus/fusion-dev]
+    default_alias: cerberus/dispatch-dev
+  # the worker's own service identity: fusion excluded (recursion guard by
+  # authorization). Deny-by-default forbids it from listing a fusion alias.
+  fusion-worker:
+    credential_env: CB_KEY_WORKER
+    allowed_modes: [dispatch]
+    allowed_aliases: [cerberus/dispatch-dev]
+
+aliases:
+  cerberus/dispatch-dev:
+    mode: dispatch
+    candidates:
+      - { provider: openrouter, credential: main, model: "google/gemma-4-26b-a4b-it:free" }
+
+  cerberus/fusion-dev:
+    mode: fusion
+    candidates:
+      - provider: openrouter
+        credential: main
+        model: "google/gemma-4-26b-a4b-it:free"
+        role: "You are the pragmatic engineer. Prioritize the simplest correct approach."
+      - provider: openrouter
+        credential: main
+        model: "qwen/qwen3-coder:free"
+        role: "You are the systems skeptic. Surface failure modes and edge cases."
+    fusion:
+      max_panel_members: 5
+      timeout_seconds: 120
+      allow_paid_panel: false
+      judge: { provider: openrouter, credential: main, model: "google/gemma-4-26b-a4b-it:free" }
+      on_partial_failure: judge_with_partial
