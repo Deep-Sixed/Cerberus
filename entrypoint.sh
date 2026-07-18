@@ -21,5 +21,6 @@ load_secret GROQ_API_KEY /run/secrets/groq_api_key
 load_secret GEMINI_API_KEY /run/secrets/gemini_api_key
 load_secret NVIDIA_API_KEY /run/secrets/nvidia_api_key
 load_secret CEREBRAS_API_KEY /run/secrets/cerebras_api_key
+load_secret CLOUDFLARE_API_TOKEN /run/secrets/cloudflare_api_token
 
 exec "$@"
