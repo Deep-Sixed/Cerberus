@@ -15,8 +15,8 @@ from cerberus.app import create_app
 from cerberus.registry import load_config_document
 from tests.test_control import ok_upstream, raw_config, write_config
 
-# every URL the dashboard is allowed to touch, and its own assets
-DASHBOARD_DATA_URLS = {"/health", "/admin/status", "/admin/config/active", "/admin/events"}
+# every URL the console is allowed to touch (all GET), and its own assets
+DASHBOARD_DATA_URLS = {"/health", "/admin/status", "/admin/config/active", "/admin/events", "/admin/providers"}
 DASHBOARD_ASSET_URLS = {"/admin/ui", "/admin/ui/app.css", "/admin/ui/app.js"}
 
 LOOPBACK = ("127.0.0.1", 40001)
@@ -103,7 +103,8 @@ async def test_page_script_performs_only_approved_same_origin_gets(monkeypatch, 
     # every fetched URL is a same-origin literal on the approved list
     fetched = set(re.findall(r'fetch\(([^)]*)\)', script))
     assert fetched == {"url"}, "fetch() must only be called through getJSON(url)"
-    literal_urls = set(re.findall(r'"(/[^"]+)"', script)) - {"/"}  # bare "/" is the a/b/c join separator
+    # "/" is a join separator; "/test" is the probe suffix appended to /admin/providers
+    literal_urls = set(re.findall(r'"(/[^"]+)"', script)) - {"/", "/test"}
     assert literal_urls <= DASHBOARD_DATA_URLS
     assert set(re.findall(r'https?://[^\s"\']+', script)) == set(), "no absolute/cross-origin URLs"
     # and every mutation endpoint of the control plane is absent from the page assets
