@@ -245,3 +245,36 @@ async def test_direct_paid_provider_model_is_rejected(monkeypatch):
     app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
     response = await call(app, "POST", "/v1/chat/completions", json={"model": "beta/beta-pro", "messages": []})
     assert response.status_code == 404  # paid model is not an exposed direct target
+
+
+def _identity_config(monkeypatch, *, allow_direct):
+    monkeypatch.setenv("ALPHA_KEY", "alpha-secret")
+    monkeypatch.setenv("CB_KEY_X", "cb-x")
+    return CerberusConfig.model_validate({
+        "metadata": {"version": "cerberus-2026-07-16.1"},
+        "providers": {"alpha": {"base_url": "https://alpha.example/v1",
+            "credentials": {"main": {"api_key_env": "ALPHA_KEY"}},
+            "models": {"alpha-free": {"cost_tier": "free"}}}},
+        "identities": {"x": {"credential_env": "CB_KEY_X", "allowed_modes": ["free"],
+            "allowed_aliases": ["cerberus/x"], "allow_direct_models": allow_direct}},
+        "aliases": {"cerberus/x": {"mode": "free",
+            "candidates": [{"provider": "alpha", "credential": "main", "model": "alpha-free"}]}},
+    })
+
+
+@pytest.mark.asyncio
+async def test_direct_models_require_per_identity_optin(monkeypatch):
+    async def upstream(_r): return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+    auth = {"authorization": "Bearer cb-x"}
+    # scoped identity: no allow_direct_models -> aliases only, direct route is 404
+    app = create_app(_identity_config(monkeypatch, allow_direct=False), http_transport=httpx.MockTransport(upstream))
+    models = await call(app, "GET", "/v1/models", headers=auth)
+    assert {m["id"] for m in models.json()["data"]} == {"cerberus/x"}
+    denied = await call(app, "POST", "/v1/chat/completions", json={"model": "alpha/alpha-free", "messages": []}, headers=auth)
+    assert denied.status_code == 404
+    # opted-in identity: sees the raw model and may route it
+    app2 = create_app(_identity_config(monkeypatch, allow_direct=True), http_transport=httpx.MockTransport(upstream))
+    models2 = await call(app2, "GET", "/v1/models", headers=auth)
+    assert "alpha/alpha-free" in {m["id"] for m in models2.json()["data"]}
+    ok = await call(app2, "POST", "/v1/chat/completions", json={"model": "alpha/alpha-free", "messages": []}, headers=auth)
+    assert ok.status_code == 200 and ok.json()["cerberus"]["provider"] == "alpha"

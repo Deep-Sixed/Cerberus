@@ -217,6 +217,10 @@ class Identity(BaseModel):
     allowed_modes: list[AliasMode] = Field(min_length=1)
     allowed_aliases: list[str] = Field(min_length=1)
     default_alias: str | None = None
+    # Opt-in to routing raw provider/model ids directly (bypassing aliases). Off
+    # by default: identities keep least privilege to their allowed_aliases; the
+    # rich-picker catalog and direct routing are unlocked only where intended.
+    allow_direct_models: bool = False
 
     @model_validator(mode="after")
     def validate_credential_source(self) -> "Identity":

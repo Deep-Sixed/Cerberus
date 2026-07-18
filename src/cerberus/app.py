@@ -512,18 +512,18 @@ def create_app(
             if context is None:
                 return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
             visible = [(name, config.aliases[name]) for name in context.identity.allowed_aliases]
-            allows_free = "free" in context.identity.allowed_modes
+            allow_direct = context.identity.allow_direct_models
         else:
             if not authenticated(request):
                 return JSONResponse(status_code=401, content={"error": {"message": "Unauthorized"}})
             visible = list(config.aliases.items())
-            allows_free = True
+            allow_direct = True  # server-token mode is the operator surface
         data: list[dict[str, Any]] = [
             {"id": alias_name, "object": "model", "owned_by": "cerberus", "cerberus_mode": alias.mode}
             for alias_name, alias in visible
         ]
-        if allows_free:
-            # rich picker: raw free provider models are directly routable (free-only)
+        if allow_direct:
+            # rich picker: raw free provider models directly routable (opt-in only, free-only)
             data.extend(
                 {"id": m["id"], "object": "model", "owned_by": m["provider"], "cerberus_mode": "direct"}
                 for m in free_provider_models(config)
@@ -558,8 +558,14 @@ def create_app(
                 content={"error": {"message": f"Unknown model {alias_name!r}; see /v1/models"}},
             )
         if direct is not None:
-            # direct free-model routing: identity need only allow free mode (this is
-            # the operator's chosen relaxation of the alias abstraction — free-only).
+            # direct free-model routing is a per-identity opt-in (allow_direct_models)
+            # AND requires free mode. Absent the opt-in, identities keep least
+            # privilege to their allowed_aliases — the model is simply "unknown".
+            if context is not None and not context.identity.allow_direct_models:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": {"message": f"Unknown model {alias_name!r}; see /v1/models"}},
+                )
             alias, _ = direct
             if context is not None and "free" not in context.identity.allowed_modes:
                 telemetry.emit(
