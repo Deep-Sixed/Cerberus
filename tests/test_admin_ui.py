@@ -292,3 +292,27 @@ async def test_events_endpoint_returns_recent_events_newest_first(monkeypatch, t
     assert payload[0]["outcome"] == "success"
     assert payload[0]["release_id"], "every event must carry a nonempty release_id"
     assert payload[0]["config_version"] == "cerberus-2026-07-16.1"
+
+
+@pytest.mark.asyncio
+async def test_admin_providers_lists_status_without_secret_values(monkeypatch, tmp_path):
+    app = make_app(monkeypatch, tmp_path)
+    async with app.router.lifespan_context(app):
+        async with client_for(app, LOOPBACK) as local:
+            resp = await local.get("/admin/providers")
+    assert resp.status_code == 200
+    providers = resp.json()["providers"]
+    alpha = next(p for p in providers if p["name"] == "alpha")
+    assert alpha["configured"] is True  # ALPHA_KEY is set by make_app
+    assert alpha["credential_envs"] == ["ALPHA_KEY"]  # names only
+    assert "alpha-secret" not in resp.text  # never leak values
+    assert any(m["cost_tier"] == "free" for m in alpha["models"])
+
+
+@pytest.mark.asyncio
+async def test_admin_providers_requires_admin_like_the_dashboard(monkeypatch, tmp_path):
+    app = make_app(monkeypatch, tmp_path)
+    async with app.router.lifespan_context(app):
+        async with client_for(app, REMOTE) as remote:
+            resp = await remote.get("/admin/providers")
+    assert resp.status_code == 403  # loopback-only, no token configured here

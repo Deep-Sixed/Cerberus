@@ -12,6 +12,7 @@ import importlib.metadata
 import json
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 from importlib.resources import files
 from typing import Any
@@ -349,6 +350,64 @@ def create_app(
         if denied is not None:
             return denied
         return JSONResponse(content={"events": telemetry.recent_events_snapshot()}, headers=_ADMIN_UI_HEADERS)
+
+    @app.get("/admin/providers", include_in_schema=False, response_model=None)
+    async def admin_providers(request: Request) -> Response:
+        denied = admin_denied(request, read_only=True)
+        if denied is not None:
+            return denied
+        config = lifecycle.active.config
+        cooled = {(c["provider"], c.get("model")) for c in store.snapshot()}
+        out = []
+        for name, provider in config.providers.items():
+            envs = sorted({cred.api_key_env for cred in provider.credentials.values()})
+            configured = all(os.environ.get(e, "").strip() for e in envs)
+            out.append(
+                {
+                    "name": name,
+                    "base_url": str(provider.base_url),
+                    "credential_envs": envs,  # names only, never values
+                    "configured": configured,
+                    "models": [
+                        {"id": m, "cost_tier": entry.cost_tier} for m, entry in provider.models.items()
+                    ],
+                    "cooled_down": any(p == name for p, _ in cooled),
+                }
+            )
+        return JSONResponse(content={"providers": out}, headers=_ADMIN_UI_HEADERS)
+
+    @app.get("/admin/providers/{name}/test", include_in_schema=False, response_model=None)
+    async def admin_provider_test(name: str, request: Request) -> Response:
+        # loopback/admin live probe: GET the provider's /models with its key.
+        denied = admin_denied(request, read_only=True)
+        if denied is not None:
+            return denied
+        config = lifecycle.active.config
+        provider = config.providers.get(name)
+        if provider is None:
+            return JSONResponse(status_code=404, content={"error": {"message": f"Unknown provider {name!r}"}})
+        cred = next(iter(provider.credentials.values()))
+        key = os.environ.get(cred.api_key_env, "").strip()
+        if not key:
+            return JSONResponse(
+                content={"ok": False, "reason": "missing_key"}, headers=_ADMIN_UI_HEADERS
+            )
+        base = str(provider.base_url).rstrip("/")
+        started = time.perf_counter()
+        try:
+            resp = await request.app.state.http_client.get(
+                f"{base}/models", headers={"authorization": f"Bearer {key}"}, timeout=10.0
+            )
+            latency_ms = round((time.perf_counter() - started) * 1000, 1)
+            ok = resp.status_code < 400
+            return JSONResponse(
+                content={"ok": ok, "status": resp.status_code, "latency_ms": latency_ms},
+                headers=_ADMIN_UI_HEADERS,
+            )
+        except httpx.HTTPError as exc:
+            return JSONResponse(
+                content={"ok": False, "reason": type(exc).__name__}, headers=_ADMIN_UI_HEADERS
+            )
 
     def serve_asset(request: Request, name: str) -> Response:
         denied = admin_denied(request, read_only=True)
