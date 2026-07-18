@@ -19,5 +19,7 @@ load_secret CERBERUS_FUSION_WORKER_TOKEN /run/secrets/cerberus_fusion_worker_tok
 load_secret OPENROUTER_API_KEY /run/secrets/openrouter_api_key
 load_secret GROQ_API_KEY /run/secrets/groq_api_key
 load_secret GEMINI_API_KEY /run/secrets/gemini_api_key
+load_secret NVIDIA_API_KEY /run/secrets/nvidia_api_key
+load_secret CEREBRAS_API_KEY /run/secrets/cerebras_api_key
 
 exec "$@"
