@@ -36,6 +36,19 @@ def id_token(*, nonce, groups, aud="cerberus", iss=ISSUER, exp_delta=3600, sub="
     })
 
 
+def break_glass(*, groups=("authentik Admins",), scope="cerberus:admin", lifetime=900, drop=(), **kw):
+    """An Authentik-issued break-glass bearer: admin group + dedicated scope + short life."""
+
+    now = int(time.time())
+    claims = {
+        "iss": ISSUER, "aud": "cerberus", "sub": "ops", "groups": list(groups),
+        "iat": now, "exp": now + lifetime,
+    }
+    if scope is not None:
+        claims["scope"] = scope
+    return sign({k: v for k, v in (claims | kw).items() if k not in drop})
+
+
 def sso_block():
     return {
         "authorize_url": "https://authentik.test/application/o/authorize/",
@@ -123,14 +136,44 @@ async def test_authenticated_but_not_admin_is_rejected(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_break_glass_admin_bearer_grants_without_session(monkeypatch, tmp_path):
     app = make_app(monkeypatch, tmp_path, token_response=lambda: {})
-    bearer = id_token(nonce=None, groups=["authentik Admins"])
     async with app.router.lifespan_context(app):
         async with remote_client(app) as client:
-            ok = await client.get("/admin/status", headers={"authorization": f"Bearer {bearer}"})
-            assert ok.status_code == 200
+            async def status(token):
+                r = await client.get("/admin/status", headers={"authorization": f"Bearer {token}"})
+                return r.status_code
+
+            assert await status(break_glass()) == 200
             # a non-admin bearer is refused
-            bad = id_token(nonce=None, groups=["nope"])
-            assert (await client.get("/admin/status", headers={"authorization": f"Bearer {bad}"})).status_code == 401
+            assert await status(break_glass(groups=["nope"])) == 401
+
+
+@pytest.mark.asyncio
+async def test_break_glass_requires_dedicated_scope_and_bounded_lifetime(monkeypatch, tmp_path):
+    """Break-glass is narrower than a login: without these two checks any admin-group
+    Authentik token — including a captured id_token or a long-lived service token —
+    would be a standing admin key."""
+
+    app = make_app(monkeypatch, tmp_path, token_response=lambda: {})
+    async with app.router.lifespan_context(app):
+        async with remote_client(app) as client:
+            async def status(token):
+                r = await client.get("/admin/status", headers={"authorization": f"Bearer {token}"})
+                return r.status_code
+
+            # a login id_token carries no scope claim, so it cannot be replayed here
+            assert await status(id_token(nonce=None, groups=["authentik Admins"])) == 401
+            assert await status(break_glass(scope=None)) == 401
+            assert await status(break_glass(scope="openid profile")) == 401
+            # correct scope alongside others is fine; `scp` is the other OAuth spelling
+            assert await status(break_glass(scope="openid cerberus:admin")) == 200
+            assert await status(break_glass(scope=None, scp=["cerberus:admin"])) == 200
+            # issued lifetime above the ceiling is refused even while unexpired
+            assert await status(break_glass(lifetime=86_400)) == 401
+            assert await status(break_glass(lifetime=3600)) == 200
+            # no iat => lifetime unprovable => refused (not a 500)
+            assert await status(break_glass(drop=["iat"])) == 401
+            # a malformed iat must also 401 cleanly rather than crash the gate
+            assert await status(break_glass(iat="not-a-time")) == 401
 
 
 @pytest.mark.asyncio
@@ -166,3 +209,23 @@ async def test_root_redirects_to_login_and_login_page_has_no_tokens(monkeypatch,
             # no secret material embedded in the login page
             assert "session-signing-secret" not in page.text and "shh" not in page.text
             assert "cerberus_admin_session" not in page.text  # cookie name not leaked as a value
+
+
+@pytest.mark.asyncio
+async def test_docs_and_openapi_follow_the_admin_boundary(monkeypatch, tmp_path):
+    """The schema enumerates every admin route and its shape, so it is admin
+    information. FastAPI serves /docs and /openapi.json publicly by default;
+    Cerberus must not."""
+
+    app = make_app(monkeypatch, tmp_path, token_response=lambda: {})
+    async with app.router.lifespan_context(app):
+        async with remote_client(app) as client:
+            for path in ("/docs", "/openapi.json"):
+                assert (await client.get(path)).status_code == 401, path
+                authorized = await client.get(
+                    path, headers={"authorization": f"Bearer {break_glass()}"}
+                )
+                assert authorized.status_code == 200, path
+            # and the schema is real, not a stub
+            schema = await client.get("/openapi.json", headers={"authorization": f"Bearer {break_glass()}"})
+            assert "/v1/chat/completions" in schema.json()["paths"]

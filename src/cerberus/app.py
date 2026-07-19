@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
@@ -171,7 +172,17 @@ def create_app(
             if admin_sso is not None:
                 await admin_sso.aclose()
 
-    app = FastAPI(title="Cerberus", version="0.1.0", lifespan=lifespan)
+    # The built-in doc routes are unconditionally public, so they are disabled here
+    # and re-served below through admin_gate (unless server.public_docs opts out).
+    public_docs = boot_config.server.public_docs
+    app = FastAPI(
+        title="Cerberus",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url="/docs" if public_docs else None,
+        redoc_url="/redoc" if public_docs else None,
+        openapi_url="/openapi.json" if public_docs else None,
+    )
     app.state.lifecycle = lifecycle
     app.state.cooldowns = store
 
@@ -283,6 +294,21 @@ def create_app(
                 return None
             return JSONResponse(status_code=401, content={"error": {"message": "Authentication required — /admin/login"}})
         return admin_denied(request, read_only=read_only)
+
+    if not public_docs:
+        # Re-served behind the same boundary as the rest of /admin: the schema names
+        # every admin route and its shape, so it is admin information itself.
+        @app.get("/openapi.json", include_in_schema=False)
+        async def openapi_schema(request: Request) -> Response:
+            denied = await admin_gate(request, read_only=True)
+            return denied if denied is not None else JSONResponse(app.openapi())
+
+        @app.get("/docs", include_in_schema=False)
+        async def swagger_ui(request: Request) -> Response:
+            denied = await admin_gate(request, read_only=True)
+            if denied is not None:
+                return denied
+            return get_swagger_ui_html(openapi_url="/openapi.json", title="Cerberus API")
 
     # -- Authentik OIDC login for the console -----------------------------
 

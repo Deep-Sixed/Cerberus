@@ -34,6 +34,9 @@ class ServerConfig(BaseModel):
     # distinct admin scope: the inference token must never authorize config
     # mutation; without this, mutating admin endpoints are loopback-only
     admin_token_env: str | None = None
+    # /docs and /openapi.json enumerate the whole admin surface, so they follow the
+    # admin boundary by default. Opt out only in development.
+    public_docs: bool = False
 
     @model_validator(mode="after")
     def validate_credential_separation(self) -> "ServerConfig":
@@ -116,6 +119,12 @@ class AdminSSOConfig(BaseModel):
     session_secret_env: str = Field(min_length=1)
     session_ttl_seconds: int = Field(default=3600, ge=60, le=86400)
     scopes: list[str] = Field(default_factory=lambda: ["openid", "profile", "email", "groups"])
+    # Break-glass is deliberately narrower than a login. The token must carry this
+    # scope — an id_token never does, so a captured login token cannot be replayed
+    # as an admin bearer — and must be short-lived *at issue* (exp - iat), so an
+    # Authentik long-lived token can never serve as a permanent admin key.
+    break_glass_scope: str = Field(default="cerberus:admin", min_length=1)
+    break_glass_max_lifetime_seconds: int = Field(default=3600, ge=60, le=86400)
     ca_bundle: str | None = None  # path to trust Authentik's TLS cert; None = system trust
     algorithms: list[Literal["RS256", "RS384", "RS512", "ES256", "ES384", "ES512"]] = Field(
         default_factory=lambda: ["RS256", "ES256"], min_length=1

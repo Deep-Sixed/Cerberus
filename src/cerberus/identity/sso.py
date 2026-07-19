@@ -127,10 +127,41 @@ class AdminSSO:
     # -- break-glass (Authentik admin bearer in the header) -------------------
 
     async def verify_break_glass(self, bearer: str) -> bool:
-        """True when the bearer is a valid Authentik admin-scoped token (JWKS + group)."""
+        """True for a valid Authentik token that is admin-group, admin-scoped, and short-lived.
+
+        Beyond the signature/issuer/audience checks every token gets, break-glass
+        adds two restrictions that a login id_token cannot satisfy: it must carry
+        the dedicated break-glass scope, and its issued lifetime must be under the
+        configured ceiling. Together these stop a captured id_token from acting as
+        an admin bearer and stop a long-lived Authentik token from becoming a
+        permanent admin key.
+        """
 
         claims = await self._validate(bearer, expected_nonce=None)
-        return claims is not None and self._is_admin(claims.get("groups"))
+        if claims is None or not self._is_admin(claims.get("groups")):
+            return False
+        return self._has_scope(claims) and self._within_lifetime(claims)
+
+    def _has_scope(self, claims: dict) -> bool:
+        """Accept either OAuth spelling: space-delimited `scope` or list-valued `scp`."""
+
+        raw = claims.get("scope")
+        granted = raw.split() if isinstance(raw, str) else []
+        scp = claims.get("scp")
+        if isinstance(scp, list):
+            granted += [s for s in scp if isinstance(s, str)]
+        elif isinstance(scp, str):
+            granted += scp.split()
+        return self._c.break_glass_scope in granted
+
+    def _within_lifetime(self, claims: dict) -> bool:
+        """Lifetime is judged at issue (exp - iat), not from now, so a nearly-expired
+        long-lived token is still rejected rather than sneaking under the ceiling."""
+
+        exp, iat = claims.get("exp"), claims.get("iat")
+        if not isinstance(exp, (int, float)) or not isinstance(iat, (int, float)):
+            return False  # no iat => lifetime unprovable => refuse
+        return 0 < exp - iat <= self._c.break_glass_max_lifetime_seconds
 
     # -- id_token / bearer validation (JWKS, stale-if-error) ------------------
 
@@ -182,7 +213,10 @@ class AdminSSO:
                 issuer=self._c.issuer,
                 options={"require": ["exp", "aud", "iss"]},
             )
-        except jwt.exceptions.InvalidTokenError:
+        # TypeError: PyJWT assumes well-typed claims, so a null/non-numeric `iat`
+        # escapes InvalidTokenError — an unauthenticated caller must not be able to
+        # turn a malformed token into a 500 on the admin gate.
+        except (jwt.exceptions.InvalidTokenError, TypeError):
             return None
         if expected_nonce is not None and claims.get("nonce") != expected_nonce:
             return None
