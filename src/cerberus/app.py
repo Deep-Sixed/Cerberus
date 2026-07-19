@@ -450,12 +450,23 @@ def create_app(
             )
         return JSONResponse(content={"providers": out}, headers=_ADMIN_UI_HEADERS)
 
-    @app.get("/admin/providers/{name}/test", include_in_schema=False, response_model=None)
+    @app.post("/admin/providers/{name}/test", include_in_schema=False, response_model=None)
     async def admin_provider_test(name: str, request: Request) -> Response:
-        # loopback/admin live probe: GET the provider's /models with its key.
+        """Live provider probe. POST (not GET) because it spends the provider's
+        quota — an operational action, not a read — and it requires a custom
+        header so a cross-site form/img cannot trigger it once cookie sessions
+        exist (simple requests cannot set custom headers; anything else is
+        preflighted, and CSP already forbids cross-origin connects)."""
+
         denied = await admin_gate(request, read_only=True)
         if denied is not None:
             return denied
+        if request.headers.get("x-cerberus-csrf") != "1":
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"message": "Missing X-Cerberus-CSRF header"}},
+                headers=_ADMIN_UI_HEADERS,
+            )
         config = lifecycle.active.config
         provider = config.providers.get(name)
         if provider is None:
@@ -463,19 +474,31 @@ def create_app(
         cred = next(iter(provider.credentials.values()))
         key = os.environ.get(cred.api_key_env, "").strip()
         if not key:
-            return JSONResponse(
-                content={"ok": False, "reason": "missing_key"}, headers=_ADMIN_UI_HEADERS
-            )
+            return JSONResponse(content={"ok": False, "reason": "missing_key"}, headers=_ADMIN_UI_HEADERS)
         base = str(provider.base_url).rstrip("/")
+        auth = {"authorization": f"Bearer {key}"}
+        client = request.app.state.http_client
         started = time.perf_counter()
         try:
-            resp = await request.app.state.http_client.get(
-                f"{base}/models", headers={"authorization": f"Bearer {key}"}, timeout=10.0
-            )
+            if provider.health_probe == "chat":
+                # providers that do not serve GET /models (e.g. Cloudflare Workers AI)
+                model = next(iter(provider.models))
+                resp = await client.post(
+                    f"{base}/chat/completions",
+                    headers=auth,
+                    json={"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
+                    timeout=15.0,
+                )
+            else:
+                resp = await client.get(f"{base}/models", headers=auth, timeout=10.0)
             latency_ms = round((time.perf_counter() - started) * 1000, 1)
-            ok = resp.status_code < 400
             return JSONResponse(
-                content={"ok": ok, "status": resp.status_code, "latency_ms": latency_ms},
+                content={
+                    "ok": resp.status_code < 400,
+                    "status": resp.status_code,
+                    "latency_ms": latency_ms,
+                    "probe": provider.health_probe,
+                },
                 headers=_ADMIN_UI_HEADERS,
             )
         except httpx.HTTPError as exc:

@@ -96,13 +96,16 @@ async def test_page_has_no_forms_or_submit_controls_or_inline_code(monkeypatch, 
 async def test_page_script_performs_only_approved_same_origin_gets(monkeypatch, tmp_path):
     app = make_app(monkeypatch, tmp_path)
     script = (await fetch(app, "/admin/ui/app.js")).text
-    # no fetch/XHR configuration for mutating methods anywhere in the script
-    assert re.search(r"\bmethod\s*[:=]", script) is None
-    assert re.search(r"\b(POST|PUT|PATCH|DELETE)\b", script) is None
+    # The console reads with plain GETs. The ONLY non-GET is the provider probe,
+    # which is a POST carrying the CSRF header (it spends provider quota).
+    assert script.count('method: "POST"') == 1
+    assert "X-Cerberus-CSRF" in script
+    assert re.search(r"\b(PUT|PATCH|DELETE)\b", script) is None
     assert "XMLHttpRequest" not in script and "sendBeacon" not in script and "WebSocket" not in script
-    # every fetched URL is a same-origin literal on the approved list
-    fetched = set(re.findall(r'fetch\(([^)]*)\)', script))
-    assert fetched == {"url"}, "fetch() must only be called through getJSON(url)"
+    # every fetch() is funnelled through a helper taking a `url` variable — never an
+    # inline/constructed target (getJSON reads; probeProvider is the CSRF'd POST)
+    first_args = {m.split(",")[0].strip() for m in re.findall(r"fetch\(([^)]*)", script)}
+    assert first_args == {"url"}, f"fetch() must only take the helper's url: {first_args}"
     # "/" is a join separator; "/test" is the probe suffix appended to /admin/providers
     literal_urls = set(re.findall(r'"(/[^"]+)"', script)) - {"/", "/test"}
     assert literal_urls <= DASHBOARD_DATA_URLS
@@ -317,3 +320,17 @@ async def test_admin_providers_requires_admin_like_the_dashboard(monkeypatch, tm
         async with client_for(app, REMOTE) as remote:
             resp = await remote.get("/admin/providers")
     assert resp.status_code == 403  # loopback-only, no token configured here
+
+
+@pytest.mark.asyncio
+async def test_provider_probe_is_post_and_requires_csrf_header(monkeypatch, tmp_path):
+    """The probe spends provider quota: it must not be reachable by a bare GET,
+    and a POST without the custom CSRF header is refused."""
+    app = make_app(monkeypatch, tmp_path)
+    async with app.router.lifespan_context(app):
+        async with client_for(app, LOOPBACK) as local:
+            assert (await local.get("/admin/providers/alpha/test")).status_code == 405
+            assert (await local.post("/admin/providers/alpha/test")).status_code == 403
+            ok = await local.post("/admin/providers/alpha/test", headers={"x-cerberus-csrf": "1"})
+            assert ok.status_code == 200
+            assert ok.json()["probe"] == "models"  # default probe kind

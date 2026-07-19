@@ -14,7 +14,15 @@ const ENDPOINTS = {
 const PROVIDERS_BASE = "/admin/providers";
 
 async function getJSON(url) {
-  const response = await fetch(url); // GET only — no method/body options anywhere
+  const response = await fetch(url); // data reads are plain GETs
+  if (!response.ok) throw new Error(url + " " + response.status);
+  return response.json();
+}
+
+// The provider probe spends the provider's quota, so it is an operational POST
+// carrying a custom header — a cross-site form/img cannot produce either.
+async function probeProvider(url) {
+  const response = await fetch(url, { method: "POST", headers: { "X-Cerberus-CSRF": "1" } });
   if (!response.ok) throw new Error(url + " " + response.status);
   return response.json();
 }
@@ -124,8 +132,8 @@ function providerCard(p) {
       probe.textContent = "testing…";
       probe.className = "probe muted";
       try {
-        const r = await getJSON(PROVIDERS_BASE + "/" + encodeURIComponent(p.name) + "/test");
-        if (r.ok) { probe.textContent = `ok ${r.status} · ${r.latency_ms}ms`; probe.className = "probe ok"; }
+        const r = await probeProvider(PROVIDERS_BASE + "/" + encodeURIComponent(p.name) + "/test");
+        if (r.ok) { probe.textContent = `ok ${r.status} · ${r.latency_ms}ms (${r.probe})`; probe.className = "probe ok"; }
         else { probe.textContent = "failed: " + text(r.reason || r.status); probe.className = "probe badc"; }
       } catch (e) { probe.textContent = "error"; probe.className = "probe badc"; }
     },

@@ -159,6 +159,11 @@ class ProviderEntry(BaseModel):
     # model: a 429 cools only the failing model; credential: account-wide
     # exhaustion, one 429 cools every model under that credential
     quota_scope: Literal["model", "credential"] = "model"
+    # How the admin health probe checks this provider. "models" GETs /models;
+    # "chat" sends a 1-token completion for providers that do not serve /models
+    # over GET (e.g. Cloudflare Workers AI returns "GET not supported" there,
+    # which would otherwise render as a false failure in the console).
+    health_probe: Literal["models", "chat"] = "models"
 
 
 class Candidate(BaseModel):
