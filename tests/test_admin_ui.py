@@ -109,7 +109,10 @@ async def test_page_script_performs_only_approved_same_origin_gets(monkeypatch, 
     # "/" is a join separator; "/test" is the probe suffix appended to /admin/providers
     literal_urls = set(re.findall(r'"(/[^"]+)"', script)) - {"/", "/test"}
     assert literal_urls <= DASHBOARD_DATA_URLS
-    assert set(re.findall(r'https?://[^\s"\']+', script)) == set(), "no absolute/cross-origin URLs"
+    # the SVG XML namespace URI is a required createElementNS() identifier, never
+    # dereferenced as a network target — excluded, everything else must be absent
+    absolute_urls = set(re.findall(r'https?://[^\s"\']+', script)) - {"http://www.w3.org/2000/svg"}
+    assert absolute_urls == set(), "no absolute/cross-origin URLs"
     # and every mutation endpoint of the control plane is absent from the page assets
     page = (await fetch(app, "/admin/ui")).text
     for mutation in ("/admin/validate", "/admin/activate", "/admin/rollback", "/admin/shadow"):

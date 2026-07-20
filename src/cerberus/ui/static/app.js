@@ -42,6 +42,28 @@ function el(tag, opts, ...kids) {
   return n;
 }
 
+// document.createElement can't produce valid <svg>/<circle> (wrong namespace) —
+// the sidebar icons work because they're parsed from static HTML; anything built
+// at runtime needs createElementNS. Same stroke-width/viewBox convention as the
+// sidebar icons, so icon-only controls built in JS don't visually fork from them.
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svgIcon(viewBox, shapes) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "nicon");
+  svg.setAttribute("viewBox", viewBox);
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.6");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("aria-hidden", "true");
+  for (const [tag, attrs] of shapes) {
+    const shape = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs)) shape.setAttribute(k, v);
+    svg.append(shape);
+  }
+  return svg;
+}
+
 // ---- state ----
 let STATE = { health: {}, status: {}, config: {}, events: [], providers: [] };
 
@@ -83,8 +105,9 @@ let ACTIVE = "overview";
 
 function renderActive() { VIEWS[ACTIVE](); }
 
-// Tiles for the "what needs attention" hero — every value traces to a field
-// already fetched this refresh; nothing here is inferred or fabricated.
+// Attention tiles — every value traces to a field already fetched this
+// refresh; nothing here is inferred or fabricated. Status lives in the
+// tile's top-border tone, never a full background wash.
 function computeAttention() {
   const { health, status, providers, events } = STATE;
   const cooled = (health.cooldowns || []).length;
@@ -99,18 +122,19 @@ function computeAttention() {
   ];
 }
 
-function renderHero() {
-  return el("div", { class: "hero" },
-    el("div", { class: "hero-top" },
-      el("div", null,
-        el("div", { class: "eyebrow", text: "Live attention surface" }),
-        el("h2", { text: "What needs attention on Cerberus" }),
-        el("p", { text: "Cooled-down and unconfigured providers, recent routing failures, and fusion readiness — pulled live on every refresh." })
-      ),
-      el("button", { class: "btn", text: "Refresh", onClick: refresh })
-    ),
-    el("div", { class: "tiles", attrs: { style: "margin-bottom:0" } }, ...computeAttention())
-  );
+// A thin colored-segment strip of the most recent routing outcomes, oldest
+// to newest left-to-right — real event data, capped to what's fetched.
+function renderOutcomeStrip(events) {
+  if (!events.length) return el("p", { class: "muted", text: "No routing events yet." });
+  const recent = events.slice(0, 30).slice().reverse();
+  const strip = el("div", { class: "stripchart" });
+  for (const e of recent) {
+    strip.append(el("div", {
+      class: "seg " + (e.outcome === "success" ? "good" : "bad"),
+      attrs: { title: `${e.outcome} · ${text(e.alias)}` },
+    }));
+  }
+  return strip;
 }
 
 function renderOverview() {
@@ -119,12 +143,21 @@ function renderOverview() {
   const aliasCount = Object.keys(config.aliases || {}).length;
   const configured = providers.filter((p) => p.configured).length;
   const cooled = providers.filter((p) => p.cooled_down).length;
-  const summaryTiles = el("div", { class: "tiles" },
-    tile("Providers", providers.length, `${configured} configured`),
-    tile("Aliases", aliasCount, "routing policies"),
-    tile("Cooled down", cooled, cooled ? "provider(s) throttled" : "all live", cooled ? "warn" : "good"),
-    tile("Events", events.length, "recent routing")
+
+  const head = el("div", { class: "pagehead-extra" },
+    el("p", { class: "muted",
+      text: `${configured}/${providers.length} providers configured · ${cooled} cooled down · ${aliasCount} alias(es) · ${events.length} recent events` }),
+    el("button", { class: "btn-ghost", onClick: refresh, attrs: { title: "Refresh now", "aria-label": "Refresh now" } },
+      svgIcon("0 0 18 18", [["circle", { cx: "9", cy: "9", r: "6", "stroke-dasharray": "26 12" }]]))
   );
+
+  const summaryTiles = el("div", { class: "tiles" }, ...computeAttention());
+
+  const stripSection = el("div", null,
+    el("h2", { class: "section", text: "Recent routing outcomes" }),
+    renderOutcomeStrip(events)
+  );
+
   const cooldowns = (health.cooldowns || []);
   const cdSection = el("div", null,
     el("h2", { class: "section", text: "Active cooldowns" }),
@@ -135,10 +168,10 @@ function renderOverview() {
         )
       : el("p", { class: "muted", text: "None — every provider is live." })
   );
-  v.replaceChildren(renderHero(), el("h2", { class: "section", text: "Snapshot" }), summaryTiles, cdSection);
+  v.replaceChildren(head, summaryTiles, stripSection, cdSection);
 }
 
-// tone: null | 'good' | 'warn' | 'danger' | 'info' — tints the whole tile,
+// tone: 'good' | 'warn' | 'danger' | 'info' — colors the tile's top border,
 // same vocabulary as .pill's good/warn/bad/accent
 function tile(label, n, sub, tone) {
   return el("div", { class: "tile" + (tone ? " " + tone : "") },
@@ -151,6 +184,17 @@ function renderProviders() {
   const grid = el("div", { class: "grid" });
   for (const p of STATE.providers) grid.append(providerCard(p));
   v.replaceChildren(grid);
+}
+
+// Deliberately text-only, no percentage bar: a 429's *applied* cooldown is
+// min(upstream Retry-After, quota_cooldown_seconds) (dispatch.py), and the
+// admin API only exposes the configured ceiling, not what was actually
+// applied — a bar computed against the ceiling would often render near-full
+// for a cooldown that just started. seconds_remaining itself is exact.
+function cooldownNote(providerName) {
+  const cd = (STATE.health.cooldowns || []).find((c) => c.provider === providerName);
+  if (!cd) return null;
+  return el("small", { text: `${Math.round(cd.seconds_remaining)}s remaining · ${text(cd.reason)}` });
 }
 
 function providerCard(p) {
@@ -176,12 +220,16 @@ function providerCard(p) {
       } catch (e) { probe.textContent = "error"; probe.className = "probe badc"; }
     },
   });
-  return el("div", { class: "card" },
+  const parts = [
     el("h3", null, el("span", { text: p.name }), badge),
     el("div", { class: "kv" }, codeText(p.base_url)),
     el("div", { class: "kv", text: "key: " + p.credential_envs.join(", ") }),
     models,
-    el("div", null, testBtn, probe));
+  ];
+  const note = p.cooled_down ? cooldownNote(p.name) : null;
+  if (note) parts.push(note);
+  parts.push(el("div", null, testBtn, probe));
+  return el("div", { class: "card" }, ...parts);
 }
 
 function renderRouting() {
