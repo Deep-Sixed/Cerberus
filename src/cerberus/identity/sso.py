@@ -17,13 +17,19 @@ import hmac
 import os
 import secrets
 import time
-from dataclasses import dataclass
 from urllib.parse import urlencode
 
 import httpx
 import jwt
 
+from cerberus.identity.session_store import (
+    AdminSession,
+    InMemorySessionStore,
+    SessionStore,
+)
 from cerberus.registry.schema import AdminSSOConfig
+
+__all__ = ["AdminSSO", "AdminSession"]
 
 _PENDING_TTL = 600.0  # seconds an unfinished login may stay open
 
@@ -32,17 +38,14 @@ def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
 
-@dataclass(slots=True)
-class AdminSession:
-    sub: str
-    email: str
-    name: str
-    groups: list[str]
-    expires: float
-
-
 class AdminSSO:
-    def __init__(self, config: AdminSSOConfig, transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        config: AdminSSOConfig,
+        transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        store: SessionStore | None = None,
+    ) -> None:
         self._c = config
         verify: str | bool = True
         if transport is None and config.ca_bundle:
@@ -50,8 +53,9 @@ class AdminSSO:
         self._http = httpx.AsyncClient(transport=transport, timeout=8.0, verify=verify)
         self._keys: dict[str, jwt.PyJWK] = {}
         self._fetched = 0.0
-        self._sessions: dict[str, AdminSession] = {}
-        self._pending: dict[str, tuple[str, str, float]] = {}  # state -> (nonce, verifier, expires)
+        # pending logins + sessions live in a shared store so they survive across
+        # workers and restarts; the in-memory default is single-worker only
+        self._store: SessionStore = store if store is not None else InMemorySessionStore()
 
     def _secret(self) -> bytes:
         return os.environ.get(self._c.session_secret_env, "").encode()
@@ -69,8 +73,7 @@ class AdminSSO:
         verifier = secrets.token_urlsafe(48)
         challenge = _b64url(hashlib.sha256(verifier.encode()).digest())
         now = time.time()
-        self._pending = {s: v for s, v in self._pending.items() if v[2] > now}  # gc
-        self._pending[state] = (nonce, verifier, now + _PENDING_TTL)
+        self._store.put_pending(state, nonce, verifier, now + _PENDING_TTL)
         params = {
             "response_type": "code",
             "client_id": self._client_id(),
@@ -88,7 +91,7 @@ class AdminSSO:
     async def complete_login(self, code: str, state: str) -> AdminSession | None:
         """Exchange the code, validate the id_token, gate on admin group. None on any failure."""
 
-        pending = self._pending.pop(state, None)  # single-use state
+        pending = self._store.pop_pending(state)  # single-use, atomic in the store
         if pending is None:
             return None
         nonce, verifier, expires = pending
@@ -226,7 +229,7 @@ class AdminSSO:
 
     def create_session(self, session: AdminSession) -> str:
         sid = secrets.token_urlsafe(32)
-        self._sessions[sid] = session
+        self._store.put_session(sid, session)
         return sid
 
     def cookie_value(self, sid: str) -> str:
@@ -240,15 +243,13 @@ class AdminSSO:
         expected = hmac.new(self._secret(), sid.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig, expected):
             return None
-        session = self._sessions.get(sid)
-        if session is None or time.time() > session.expires:
-            self._sessions.pop(sid, None)
-            return None
-        return session
+        # the store returns None (and evicts) once expired
+        return self._store.get_session(sid)
 
     def logout(self, cookie: str | None) -> None:
         if cookie and "." in cookie:
-            self._sessions.pop(cookie.rpartition(".")[0], None)
+            self._store.delete_session(cookie.rpartition(".")[0])
 
     async def aclose(self) -> None:
+        self._store.close()
         await self._http.aclose()

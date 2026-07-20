@@ -33,6 +33,7 @@ from cerberus.identity import (
     supplied_credential,
 )
 from cerberus.fusion import FusionWorkerClient, fusion_aliases, fusion_dispatch
+from cerberus.identity.session_store import InMemorySessionStore, SqliteSessionStore
 from cerberus.identity.sso import AdminSSO
 from cerberus.registry import CerberusConfig, ConfigDocument, load_config_document
 from cerberus.registry.schema import Alias, Candidate
@@ -155,7 +156,13 @@ def create_app(
         AuthentikVerifier(boot_config.authentik, jwks_transport) if boot_config.authentik is not None else None
     )
     fusion_worker = FusionWorkerClient(boot_config.fusion_worker, fusion_transport)
-    admin_sso = AdminSSO(boot_config.admin_sso, sso_transport) if boot_config.admin_sso is not None else None
+    if boot_config.admin_sso is not None:
+        # sessions + pending logins share the state DB when one is configured, so
+        # they survive restarts and are consistent across workers; else in-memory
+        session_store = SqliteSessionStore(state_path) if state_path else InMemorySessionStore()
+        admin_sso = AdminSSO(boot_config.admin_sso, sso_transport, store=session_store)
+    else:
+        admin_sso = None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
