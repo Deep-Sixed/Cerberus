@@ -1,9 +1,13 @@
-"""Session 9 acceptance tests — read-only dashboard (SPEC test 19 analog).
+"""Session 9 acceptance tests — dashboard read surface + narrow, allow-listed
+config editing (SPEC test 19 analog, extended).
 
-The read-only property is proven behaviorally: the dashboard's routes accept
-only GET/HEAD, the page carries no forms or submit controls, and the page
+The read surface's boundary is proven behaviorally: its routes accept only
+GET/HEAD, the page carries no native form-submission path (buttons are
+type="button", never inside a <form>, never type="submit"), and the page
 script is audited for mutating fetch configuration — not by grepping the HTML
-for banned words.
+for banned words. The console's one write path (stage/validate/activate, an
+allow-listed subset of operational fields) is intentional and CSRF-guarded;
+it is verified directly rather than asserted absent.
 """
 
 import re
@@ -15,8 +19,13 @@ from cerberus.app import create_app
 from cerberus.registry import load_config_document
 from tests.test_control import ok_upstream, raw_config, write_config
 
+CSRF = {"x-cerberus-csrf": "1"}
+
 # every URL the console is allowed to touch (all GET), and its own assets
-DASHBOARD_DATA_URLS = {"/health", "/admin/status", "/admin/config/active", "/admin/events", "/admin/providers"}
+DASHBOARD_DATA_URLS = {
+    "/health", "/admin/status", "/admin/config/active", "/admin/config/schema",
+    "/admin/events", "/admin/providers",
+}
 DASHBOARD_ASSET_URLS = {"/admin/ui", "/admin/ui/app.css", "/admin/ui/app.js"}
 
 LOOPBACK = ("127.0.0.1", 40001)
@@ -86,37 +95,54 @@ async def test_page_has_no_forms_or_submit_controls_or_inline_code(monkeypatch, 
     html = page.text.lower()
     assert "<form" not in html
     assert "formaction" not in html
-    assert 'type="submit"' not in html and "<button" not in html and "<input" not in html
+    assert "<input" not in html  # every field input is JS-created at runtime, never static
+    assert 'type="submit"' not in html
+    # every static <button> must be explicitly type="button" — inert without JS,
+    # and with no <form> on the page (asserted above) there's nothing to submit
+    # to even if the type attribute were ever omitted
+    buttons = re.findall(r"<button\b[^>]*>", html)
+    assert buttons, "expected the config editor's static action-bar buttons"
+    assert all('type="button"' in b for b in buttons), buttons
     # CSP compatibility: no inline script bodies, no inline event handlers
     assert re.search(r"<script(?![^>]*\bsrc=)", html) is None
     assert re.search(r"\son\w+\s*=", html) is None
 
 
+# the console's one write path: an allow-listed subset of operational config
+# fields, staged then run through the existing, already-reviewed validate/
+# activate machinery. rollback and shadow are deliberately NOT wired to any
+# UI control in this pass — no browser control should reach them yet.
+WIRED_MUTATION_URLS = {"/admin/config/stage", "/admin/validate", "/admin/activate"}
+UNWIRED_MUTATION_URLS = {"/admin/rollback", "/admin/shadow"}
+
+
 @pytest.mark.asyncio
-async def test_page_script_performs_only_approved_same_origin_gets(monkeypatch, tmp_path):
+async def test_page_script_performs_only_approved_same_origin_requests(monkeypatch, tmp_path):
     app = make_app(monkeypatch, tmp_path)
     script = (await fetch(app, "/admin/ui/app.js")).text
-    # The console reads with plain GETs. The ONLY non-GET is the provider probe,
-    # which is a POST carrying the CSRF header (it spends provider quota).
+    # every write (provider probe, stage, validate, activate) funnels through
+    # one shared POST helper, carrying the CSRF header — not four call sites
     assert script.count('method: "POST"') == 1
     assert "X-Cerberus-CSRF" in script
     assert re.search(r"\b(PUT|PATCH|DELETE)\b", script) is None
     assert "XMLHttpRequest" not in script and "sendBeacon" not in script and "WebSocket" not in script
     # every fetch() is funnelled through a helper taking a `url` variable — never an
-    # inline/constructed target (getJSON reads; probeProvider is the CSRF'd POST)
+    # inline/constructed target (getJSON reads; postJSON is the CSRF'd write path)
     first_args = {m.split(",")[0].strip() for m in re.findall(r"fetch\(([^)]*)", script)}
     assert first_args == {"url"}, f"fetch() must only take the helper's url: {first_args}"
     # "/" is a join separator; "/test" is the probe suffix appended to /admin/providers
     literal_urls = set(re.findall(r'"(/[^"]+)"', script)) - {"/", "/test"}
-    assert literal_urls <= DASHBOARD_DATA_URLS
+    assert literal_urls <= DASHBOARD_DATA_URLS | WIRED_MUTATION_URLS
+    assert literal_urls.isdisjoint(UNWIRED_MUTATION_URLS), literal_urls & UNWIRED_MUTATION_URLS
     # the SVG XML namespace URI is a required createElementNS() identifier, never
     # dereferenced as a network target — excluded, everything else must be absent
     absolute_urls = set(re.findall(r'https?://[^\s"\']+', script)) - {"http://www.w3.org/2000/svg"}
     assert absolute_urls == set(), "no absolute/cross-origin URLs"
-    # and every mutation endpoint of the control plane is absent from the page assets
+    # rollback/shadow stay entirely absent from the shipped assets — not a
+    # capability the browser can reach even indirectly
     page = (await fetch(app, "/admin/ui")).text
-    for mutation in ("/admin/validate", "/admin/activate", "/admin/rollback", "/admin/shadow"):
-        assert mutation not in script and mutation not in page
+    for unwired in UNWIRED_MUTATION_URLS:
+        assert unwired not in script and unwired not in page
 
 
 @pytest.mark.asyncio
@@ -174,7 +200,7 @@ async def test_forwarding_headers_cannot_impersonate_loopback(monkeypatch, tmp_p
                 assert response.status_code == 403, headers
 
 
-MUTATION_URLS = ("/admin/validate", "/admin/activate", "/admin/rollback", "/admin/shadow")
+MUTATION_URLS = ("/admin/config/stage", "/admin/validate", "/admin/activate", "/admin/rollback", "/admin/shadow")
 INFER = {"model": "cerberus/free", "messages": []}
 
 
@@ -243,11 +269,11 @@ async def test_mutations_are_loopback_only_for_every_credential(monkeypatch, tmp
             ):
                 for url in MUTATION_URLS:
                     assert (await remote.post(url, json={}, headers=headers)).status_code == 403, (url, headers)
-        # a true loopback peer reaches the mutation endpoints (auth passes;
+        # a true loopback peer reaches the mutation endpoints (auth + CSRF pass;
         # empty bodies then fail validation, not authorization)
         async with client_for(app, LOOPBACK) as local:
-            assert (await local.post("/admin/validate", json={})).status_code == 400
-            assert (await local.post("/admin/rollback")).status_code == 409
+            assert (await local.post("/admin/validate", json={}, headers=CSRF)).status_code == 400
+            assert (await local.post("/admin/rollback", headers=CSRF)).status_code == 409
 
 
 @pytest.mark.asyncio
@@ -337,3 +363,18 @@ async def test_provider_probe_is_post_and_requires_csrf_header(monkeypatch, tmp_
             ok = await local.post("/admin/providers/alpha/test", headers={"x-cerberus-csrf": "1"})
             assert ok.status_code == 200
             assert ok.json()["probe"] == "models"  # default probe kind
+
+
+@pytest.mark.asyncio
+async def test_every_mutation_endpoint_requires_csrf_even_from_loopback(monkeypatch, tmp_path):
+    """A loopback-authenticated request is not enough on its own for a mutation
+    (R4's lesson, now applied to all five, not just the provider probe): every
+    /admin/* POST that changes state must also carry the CSRF header, since a
+    cross-site form/img riding an ambient SSO session cookie cannot set one."""
+    app = make_app(monkeypatch, tmp_path)
+    async with app.router.lifespan_context(app):
+        async with client_for(app, LOOPBACK) as local:
+            for url in MUTATION_URLS:
+                resp = await local.post(url, json={})
+                assert resp.status_code == 403, (url, resp.status_code)
+                assert "csrf" in resp.json()["error"]["message"].lower(), (url, resp.json())

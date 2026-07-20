@@ -12,18 +12,22 @@ import importlib.metadata
 import json
 import os
 import secrets
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from importlib.resources import files
+from pathlib import Path
 from typing import Any
 
 import httpx
+import yaml
 from fastapi import FastAPI, Request
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
 from cerberus.control import ConfigLifecycle
+from cerberus.control.admin_fields import apply_updates, build_schema, stage
 from cerberus.identity import (
     AuthentikVerifier,
     IdentityContext,
@@ -141,6 +145,12 @@ def create_app(
     boot_config = document.config  # infrastructure bindings: fixed at boot
     state_path = boot_config.state.path
     store = SqliteCooldownStore(state_path) if state_path else InMemoryCooldownStore()
+    # staged candidate configs from the browser editor land here — the same
+    # writable volume as the state DB in production; a tmp fallback keeps
+    # tests/dry-runs (state.path=None) working without touching disk state
+    admin_staging_dir = (
+        str(Path(state_path).parent / "staging") if state_path else str(Path(tempfile.gettempdir()) / "cerberus-admin-staging")
+    )
     telemetry = TelemetryEmitter(
         boot_config.telemetry,
         telemetry_transport,
@@ -302,6 +312,21 @@ def create_app(
             return JSONResponse(status_code=401, content={"error": {"message": "Authentication required — /admin/login"}})
         return admin_denied(request, read_only=read_only)
 
+    def require_csrf(request: Request) -> JSONResponse | None:
+        """A custom header a cross-site form/img cannot set, so a page riding an
+        ambient SSO session cookie can't trigger a mutation via a simple request
+        (anything else is CORS-preflighted, and CSP already forbids cross-origin
+        connects). Same check the provider probe already uses (R4); applied here
+        to every state-mutating /admin/* POST now that cookie sessions exist."""
+
+        if request.headers.get("x-cerberus-csrf") != "1":
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"message": "Missing X-Cerberus-CSRF header"}},
+                headers=_ADMIN_UI_HEADERS,
+            )
+        return None
+
     if not public_docs:
         # Re-served behind the same boundary as the rest of /admin: the schema names
         # every admin route and its shape, so it is admin information itself.
@@ -398,9 +423,43 @@ def create_app(
             return denied
         return lifecycle.active.config.model_dump(mode="json")
 
+    @app.get("/admin/config/schema", response_model=None)
+    async def admin_config_schema(request: Request) -> dict[str, Any] | JSONResponse:
+        denied = await admin_gate(request, read_only=True)
+        if denied is not None:
+            return denied
+        return build_schema(lifecycle.active.config)
+
+    @app.post("/admin/config/stage")
+    async def admin_config_stage(request: Request) -> JSONResponse:
+        denied = await admin_gate(request)
+        if denied is not None:
+            return denied
+        denied = require_csrf(request)
+        if denied is not None:
+            return denied
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return JSONResponse(status_code=400, content={"error": {"message": "Invalid JSON body"}})
+        updates = body.get("updates") if isinstance(body, dict) else None
+        if not isinstance(updates, dict):
+            return JSONResponse(status_code=400, content={"error": {"message": "updates object is required"}})
+        try:
+            candidate = apply_updates(lifecycle.active.config, updates)
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"staged": False, "error": str(exc)})
+        except ValidationError as exc:
+            return JSONResponse(status_code=422, content={"staged": False, "error": str(exc)})
+        path = stage(candidate, admin_staging_dir)
+        return JSONResponse(content={"staged": True, "path": path, "version": candidate.metadata.version})
+
     @app.post("/admin/validate")
     async def admin_validate(request: Request) -> JSONResponse:
         denied = await admin_gate(request)
+        if denied is not None:
+            return denied
+        denied = require_csrf(request)
         if denied is not None:
             return denied
         path, error = await admin_body_path(request)
@@ -408,7 +467,7 @@ def create_app(
             return error or JSONResponse(status_code=400, content={"error": {"message": "path is required"}})
         try:
             candidate = lifecycle.validate(path)
-        except (ValidationError, RuntimeError, OSError, ValueError) as exc:
+        except (ValidationError, RuntimeError, OSError, ValueError, yaml.YAMLError) as exc:
             return JSONResponse(status_code=422, content={"valid": False, "error": str(exc)})
         return JSONResponse(content={"valid": True, "version": candidate.version, "checksum": candidate.checksum})
 
@@ -417,18 +476,24 @@ def create_app(
         denied = await admin_gate(request)
         if denied is not None:
             return denied
+        denied = require_csrf(request)
+        if denied is not None:
+            return denied
         path, error = await admin_body_path(request)
         if error is not None or path is None:
             return error or JSONResponse(status_code=400, content={"error": {"message": "path is required"}})
         try:
             activated = lifecycle.activate(path)
-        except (ValidationError, RuntimeError, OSError, ValueError) as exc:
+        except (ValidationError, RuntimeError, OSError, ValueError, yaml.YAMLError) as exc:
             return JSONResponse(status_code=422, content={"activated": False, "error": str(exc)})
         return JSONResponse(content={"activated": True, "active_version": activated.version})
 
     @app.post("/admin/rollback")
     async def admin_rollback(request: Request) -> JSONResponse:
         denied = await admin_gate(request)
+        if denied is not None:
+            return denied
+        denied = require_csrf(request)
         if denied is not None:
             return denied
         try:
@@ -442,12 +507,15 @@ def create_app(
         denied = await admin_gate(request)
         if denied is not None:
             return denied
+        denied = require_csrf(request)
+        if denied is not None:
+            return denied
         path, error = await admin_body_path(request)
         if error is not None:
             return error
         try:
             shadow = lifecycle.arm_shadow(path)
-        except (ValidationError, RuntimeError, OSError, ValueError) as exc:
+        except (ValidationError, RuntimeError, OSError, ValueError, yaml.YAMLError) as exc:
             return JSONResponse(status_code=422, content={"armed": False, "error": str(exc)})
         return JSONResponse(content={"shadow_version": shadow.version if shadow else None})
 
@@ -494,12 +562,9 @@ def create_app(
         denied = await admin_gate(request, read_only=True)
         if denied is not None:
             return denied
-        if request.headers.get("x-cerberus-csrf") != "1":
-            return JSONResponse(
-                status_code=403,
-                content={"error": {"message": "Missing X-Cerberus-CSRF header"}},
-                headers=_ADMIN_UI_HEADERS,
-            )
+        denied = require_csrf(request)
+        if denied is not None:
+            return denied
         config = lifecycle.active.config
         provider = config.providers.get(name)
         if provider is None:

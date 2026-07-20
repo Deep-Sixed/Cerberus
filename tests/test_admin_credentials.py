@@ -11,7 +11,7 @@ import cerberus.cli
 from cerberus.app import create_app
 from cerberus.registry import CerberusConfig, load_config_document
 from cerberus.registry.loader import require_configured_credentials, required_credential_envs
-from tests.test_control import ok_upstream, raw_config, write_config
+from tests.test_control import CSRF, ok_upstream, raw_config, write_config
 
 
 def tokened_config(tmp_path, name="v1.yaml", api_env="CERBERUS_API_TOKEN", admin_env="CERBERUS_ADMIN_TOKEN"):
@@ -113,7 +113,8 @@ async def test_validated_admin_token_keeps_read_only_remote_and_loopback_mutatio
                 assert (await remote.post(url, json={}, headers=admin)).status_code == 403, url
         local_transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 40001))
         async with httpx.AsyncClient(transport=local_transport, base_url="http://test") as local:
-            assert (await local.post("/admin/validate", json={})).status_code == 400  # auth ok, body invalid
+            # auth + CSRF ok, body invalid
+            assert (await local.post("/admin/validate", json={}, headers=CSRF)).status_code == 400
 
 
 # -- uvicorn startup path -----------------------------------------------------
@@ -160,7 +161,7 @@ async def test_real_bound_server_ignores_forwarding_headers(monkeypatch, tmp_pat
                 {"forwarded": "for=127.0.0.1"},
             ]
             for headers in spoofs:
-                response = await client.post("/admin/rollback", headers=headers)
+                response = await client.post("/admin/rollback", headers=headers | CSRF)
                 # authorization passed on the true loopback peer in every case;
                 # 409 = empty rollback history, never 401/403
                 assert response.status_code == 409, headers

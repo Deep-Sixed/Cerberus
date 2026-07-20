@@ -9,6 +9,8 @@ import yaml
 from cerberus.app import create_app
 from cerberus.registry import load_config_document
 
+CSRF = {"x-cerberus-csrf": "1"}
+
 
 def raw_config(version: str, model: str = "alpha-one", host: str = "alpha.example") -> dict:
     return {
@@ -67,8 +69,8 @@ async def test_validate_reports_version_and_rejects_bad_configs(env, tmp_path):
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            ok = await client.post("/admin/validate", json={"path": good})
-            broken = await client.post("/admin/validate", json={"path": bad})
+            ok = await client.post("/admin/validate", json={"path": good}, headers=CSRF)
+            broken = await client.post("/admin/validate", json={"path": bad}, headers=CSRF)
 
     assert ok.status_code == 200
     assert ok.json()["valid"] is True and ok.json()["version"] == "cerberus-2026-07-16.2"
@@ -92,10 +94,10 @@ async def test_activate_swaps_atomically_and_rollback_restores(env, tmp_path):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             body = {"model": "cerberus/free", "messages": []}
             await client.post("/v1/chat/completions", json=body)
-            activated = await client.post("/admin/activate", json={"path": v2})
+            activated = await client.post("/admin/activate", json={"path": v2}, headers=CSRF)
             await client.post("/v1/chat/completions", json=body)
             health_after_activate = await client.get("/health")
-            rolled = await client.post("/admin/rollback")
+            rolled = await client.post("/admin/rollback", headers=CSRF)
             await client.post("/v1/chat/completions", json=body)
             health_after_rollback = await client.get("/health")
 
@@ -120,9 +122,9 @@ async def test_version_cannot_be_rebound_to_a_different_checksum(env, tmp_path):
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            validated = await client.post("/admin/validate", json={"path": collision_path})
-            shadowed = await client.post("/admin/shadow", json={"path": collision_path})
-            activated = await client.post("/admin/activate", json={"path": collision_path})
+            validated = await client.post("/admin/validate", json={"path": collision_path}, headers=CSRF)
+            shadowed = await client.post("/admin/shadow", json={"path": collision_path}, headers=CSRF)
+            activated = await client.post("/admin/activate", json={"path": collision_path}, headers=CSRF)
             status = await client.get("/admin/status")
 
     for response in (validated, shadowed, activated):
@@ -148,9 +150,9 @@ async def test_rolled_back_version_binding_remains_reserved(env, tmp_path):
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            assert (await client.post("/admin/activate", json={"path": v2})).status_code == 200
-            assert (await client.post("/admin/rollback")).status_code == 200
-            rebound = await client.post("/admin/activate", json={"path": v2_collision})
+            assert (await client.post("/admin/activate", json={"path": v2}, headers=CSRF)).status_code == 200
+            assert (await client.post("/admin/rollback", headers=CSRF)).status_code == 200
+            rebound = await client.post("/admin/activate", json={"path": v2_collision}, headers=CSRF)
 
     assert rebound.status_code == 422
     assert "already bound to checksum" in rebound.json()["error"]
@@ -163,7 +165,7 @@ async def test_rollback_without_history_is_conflict(env, tmp_path):
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/admin/rollback")
+            response = await client.post("/admin/rollback", headers=CSRF)
     assert response.status_code == 409
 
 
@@ -218,9 +220,9 @@ async def test_shadow_decisions_recorded_never_served_never_called(env, tmp_path
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            armed = await client.post("/admin/shadow", json={"path": shadow})
+            armed = await client.post("/admin/shadow", json={"path": shadow}, headers=CSRF)
             response = await client.post("/v1/chat/completions", json={"model": "cerberus/free", "messages": []})
-            cleared = await client.post("/admin/shadow", json={"path": None})
+            cleared = await client.post("/admin/shadow", json={"path": None}, headers=CSRF)
 
     assert armed.json()["shadow_version"] == "cerberus-2026-07-16.9"
     assert cleared.json()["shadow_version"] is None
@@ -278,7 +280,7 @@ async def test_shadow_records_a_miss_when_candidate_config_drops_the_alias(env, 
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            await client.post("/admin/shadow", json={"path": shadow})
+            await client.post("/admin/shadow", json={"path": shadow}, headers=CSRF)
             await client.post("/v1/chat/completions", json={"model": "cerberus/free", "messages": []})
 
     misses = [e for e in events if e["outcome"] == "shadow" and e["mode"] == "missing"]

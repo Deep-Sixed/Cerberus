@@ -1,16 +1,22 @@
-/* Cerberus admin console — read + live-probe only.
-   All data enters the DOM via textContent/createElement (never innerHTML), and
-   every network call is a same-origin GET through getJSON(url), or the CSRF'd
-   same-origin probe POST. No config mutation from here: the lifecycle stays
-   git + the /admin API. */
+/* Cerberus admin console — read + live-probe, plus one narrow write path.
+   All data enters the DOM via textContent/createElement (never innerHTML).
+   Reads are plain same-origin GETs through getJSON(url). The only writes are
+   the provider probe and the config editor's stage/validate/activate loop —
+   both funnel through the single CSRF'd postJSON(url, body) below, an
+   allow-listed subset of operational fields (never secrets, never identity,
+   access-control, or server bindings — the backend enforces that boundary). */
 "use strict";
 
 const ENDPOINTS = {
   health: "/health",
   status: "/admin/status",
   config: "/admin/config/active",
+  schema: "/admin/config/schema",
   events: "/admin/events",
   providers: "/admin/providers",
+  stage: "/admin/config/stage",
+  validate: "/admin/validate",
+  activate: "/admin/activate",
 };
 const PROVIDERS_BASE = "/admin/providers";
 
@@ -20,12 +26,18 @@ async function getJSON(url) {
   return response.json();
 }
 
-// The provider probe spends the provider's quota, so it is an operational POST
-// carrying a custom header — a cross-site form/img cannot produce either.
-async function probeProvider(url) {
-  const response = await fetch(url, { method: "POST", headers: { "X-Cerberus-CSRF": "1" } });
-  if (!response.ok) throw new Error(url + " " + response.status);
-  return response.json();
+// Every write (provider probe, stage, validate, activate) goes through this
+// one function — an operational POST carrying a custom header a cross-site
+// form/img cannot produce. Never throws on a non-2xx: callers need the JSON
+// body even on a 422 (it carries {"...": false, "error": "..."}).
+async function postJSON(url, body) {
+  const options = { method: "POST", headers: { "X-Cerberus-CSRF": "1" } };
+  if (body !== undefined) {
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(url, options);
+  return { ok: response.ok, status: response.status, json: await response.json() };
 }
 
 const text = (v) => String(v ?? "—");
@@ -100,10 +112,17 @@ function renderTop() {
 }
 
 // ---- views ----
+// "config" is deliberately not in VIEWS: it owns fields the user may be
+// mid-editing, so the 5s auto-refresh must never blindly re-render it (that
+// would silently wipe unsaved input). It loads once on entry (loadConfigView)
+// and again only after a successful Apply.
 const VIEWS = { overview: renderOverview, providers: renderProviders, routing: renderRouting, events: renderEvents };
 let ACTIVE = "overview";
 
-function renderActive() { VIEWS[ACTIVE](); }
+function renderActive() {
+  if (ACTIVE === "config") return;
+  VIEWS[ACTIVE]();
+}
 
 // Attention tiles — every value traces to a field already fetched this
 // refresh; nothing here is inferred or fabricated. Status lives in the
@@ -214,9 +233,11 @@ function providerCard(p) {
       probe.textContent = "testing…";
       probe.className = "probe muted";
       try {
-        const r = await probeProvider(PROVIDERS_BASE + "/" + encodeURIComponent(p.name) + "/test");
-        if (r.ok) { probe.textContent = `ok ${r.status} · ${r.latency_ms}ms (${r.probe})`; probe.className = "probe ok"; }
-        else { probe.textContent = "failed: " + text(r.reason || r.status); probe.className = "probe badc"; }
+        const r = await postJSON(PROVIDERS_BASE + "/" + encodeURIComponent(p.name) + "/test");
+        if (!r.ok) { probe.textContent = "error " + r.status; probe.className = "probe badc"; return; }
+        const body = r.json; // the probe's own outcome, distinct from the HTTP status
+        if (body.ok) { probe.textContent = `ok ${body.status} · ${body.latency_ms}ms (${body.probe})`; probe.className = "probe ok"; }
+        else { probe.textContent = "failed: " + text(body.reason || body.status); probe.className = "probe badc"; }
       } catch (e) { probe.textContent = "error"; probe.className = "probe badc"; }
     },
   });
@@ -281,16 +302,161 @@ function table(headers, rows) {
   return el("table", null, thead, tbody);
 }
 
+// ---- config editor ----
+// Narrow, allow-listed field editing (provider cooldown windows, health-probe
+// mode). The allow-list is enforced server-side (admin_fields.py); this view
+// only renders whatever the schema endpoint actually returns, so it can never
+// offer an edit the backend would reject. Secrets are shown, locked: Cerberus
+// runs in a container with no path to the KeePassXC vault, so there is no
+// write mechanism this form could honestly wire up for them.
+
+async function loadConfigView() {
+  setConfigMessage("");
+  try {
+    const schema = await getJSON(ENDPOINTS.schema);
+    renderConfigFields(schema);
+    updateDirtyState();
+  } catch (e) {
+    setConfigMessage("Could not load config schema", "error");
+  }
+}
+
+function renderConfigFields(schema) {
+  const v = document.getElementById("view-config");
+  const bySection = new Map(schema.sections.map((s) => [s.id, []]));
+  for (const f of schema.fields) {
+    if (!bySection.has(f.section)) bySection.set(f.section, []);
+    bySection.get(f.section).push(f);
+  }
+  const sections = schema.sections.map((section) => {
+    const grid = el("div", { class: "field-grid" });
+    for (const f of bySection.get(section.id) || []) grid.append(renderField(f));
+    return el("div", { class: "settings-section" },
+      el("div", { class: "section-heading" }, el("h3", { text: section.label }), el("p", { text: section.description })),
+      grid);
+  });
+  v.replaceChildren(...sections);
+}
+
+function renderField(f) {
+  const label = el("label", null, el("span", { text: f.label }));
+  if (f.locked) label.append(el("span", { class: "field-source", text: "locked" }));
+  const input = fieldInput(f);
+  input.id = "field-" + f.key;
+  input.dataset.key = f.key;
+  input.dataset.original = String(f.value);
+  input.disabled = f.locked;
+  input.addEventListener("input", updateDirtyState);
+  input.addEventListener("change", updateDirtyState);
+  const wrap = el("div", { class: "field" }, label, input);
+  if (f.description) wrap.append(el("div", { class: "field-description", text: f.description }));
+  return wrap;
+}
+
+function fieldInput(f) {
+  if (f.type === "select") {
+    const select = el("select");
+    for (const opt of f.options || []) select.append(el("option", { text: opt, attrs: { value: opt } }));
+    select.value = f.value;
+    return select;
+  }
+  const input = el("input", { attrs: { type: f.type === "number" ? "number" : "text" } });
+  input.value = f.value ?? "";
+  return input;
+}
+
+function changedFieldValues() {
+  const values = {};
+  document.querySelectorAll("#view-config [data-key]").forEach((input) => {
+    if (input.disabled) return;
+    if (input.value !== input.dataset.original) values[input.dataset.key] = input.value;
+  });
+  return values;
+}
+
+// Recomputed on every field input, so it must double as the in-flight lock —
+// otherwise editing a field while Apply's request is outstanding re-enables
+// the button (count > 0 again) and a second, overlapping apply can fire.
+let APPLYING = false;
+
+function updateDirtyState() {
+  const count = Object.keys(changedFieldValues()).length;
+  document.getElementById("dirtyState").textContent =
+    count === 0 ? "No changes" : `${count} unsaved change${count === 1 ? "" : "s"}`;
+  document.getElementById("applyButton").disabled = count === 0 || APPLYING;
+}
+
+function setConfigMessage(message, kind) {
+  const area = document.getElementById("configMessage");
+  area.textContent = message;
+  area.className = "message-area" + (kind ? " " + kind : "");
+}
+
+// stage (build + write a candidate) -> validate (bind version to checksum,
+// the immutability guarantee) -> [activate]. Reused identically by both
+// buttons; Apply just takes the extra activate step validate stops short of.
+async function stageAndValidate(updates) {
+  const staged = await postJSON(ENDPOINTS.stage, { updates });
+  if (!staged.ok) return { ok: false, message: staged.json.error || `Could not stage (${staged.status})` };
+  const validated = await postJSON(ENDPOINTS.validate, { path: staged.json.path });
+  if (!validated.ok || !validated.json.valid) {
+    return { ok: false, message: validated.json.error || "Invalid" };
+  }
+  return { ok: true, path: staged.json.path, version: staged.json.version };
+}
+
+async function validateConfig() {
+  const updates = changedFieldValues();
+  if (!Object.keys(updates).length) { setConfigMessage("No changes to validate", ""); return; }
+  try {
+    const result = await stageAndValidate(updates);
+    setConfigMessage(
+      result.ok ? `Valid — would become ${result.version}` : result.message,
+      result.ok ? "ok" : "error"
+    );
+  } catch (e) {
+    setConfigMessage("Network error — could not reach server", "error");
+  }
+}
+
+async function applyConfig() {
+  const updates = changedFieldValues();
+  if (!Object.keys(updates).length || APPLYING) return;
+  APPLYING = true;
+  document.getElementById("applyButton").disabled = true;
+  try {
+    const staged = await stageAndValidate(updates);
+    if (!staged.ok) { setConfigMessage(staged.message, "error"); return; }
+    const activated = await postJSON(ENDPOINTS.activate, { path: staged.path });
+    if (!activated.ok) { setConfigMessage(activated.json.error || "Could not activate", "error"); return; }
+    await loadConfigView(); // fresh values from the now-active config, dirty state clears
+    await refresh(); // reflect the new config_version in the topbar and other views
+    setConfigMessage(`Applied — now ${activated.json.active_version}`, "ok"); // after reload — loadConfigView() clears the message area first
+  } catch (e) {
+    setConfigMessage("Network error — apply failed", "error");
+  } finally {
+    APPLYING = false;
+    updateDirtyState();
+  }
+}
+
 // ---- nav ----
 function show(view) {
+  // re-clicking Config while already there, mid-edit, would otherwise silently
+  // discard unsaved input via the unconditional loadConfigView() call below
+  if (view === "config" && ACTIVE === "config" && Object.keys(changedFieldValues()).length) return;
   ACTIVE = view;
   document.querySelectorAll("#side a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
   document.querySelectorAll(".view").forEach((s) => (s.hidden = s.id !== "view-" + view));
   document.getElementById("title").textContent =
-    { overview: "Overview", providers: "Providers", routing: "Model Routing", events: "Events" }[view];
-  renderActive();
+    { overview: "Overview", providers: "Providers", routing: "Model Routing", events: "Events", config: "Config" }[view];
+  document.getElementById("config-actionbar").hidden = view !== "config";
+  if (view === "config") loadConfigView();
+  else renderActive();
 }
 document.querySelectorAll("#side a").forEach((a) => a.addEventListener("click", () => show(a.dataset.view)));
+document.getElementById("validateButton").addEventListener("click", validateConfig);
+document.getElementById("applyButton").addEventListener("click", applyConfig);
 
 refresh();
 setInterval(refresh, 5000);
