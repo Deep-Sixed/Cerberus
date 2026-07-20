@@ -13,16 +13,27 @@
 <div id="app">
   <nav id="side">
     <div class="brand"><span class="logo">C</span><div><b>Cerberus</b><small>gateway console</small></div></div>
-    <a data-view="overview" class="active">Overview</a>
-    <a data-view="providers">Providers</a>
-    <a data-view="routing">Model Routing</a>
-    <a data-view="events">Events</a>
+    <div class="navgroup">
+      <a data-view="overview" class="active">Overview</a>
+    </div>
+    <div class="navgroup">
+      <h6>Routing</h6>
+      <a data-view="providers">Providers</a>
+      <a data-view="routing">Model Routing</a>
+    </div>
+    <div class="navgroup">
+      <h6>Activity</h6>
+      <a data-view="events">Events</a>
+    </div>
     <div class="side-foot"><span id="side-health" class="pill">…</span></div>
   </nav>
   <main id="main">
     <header id="topbar">
       <div><small id="crumb">LOCAL ADMIN</small><h1 id="title">Overview</h1></div>
-      <div id="top-status"></div>
+      <div id="top-status-wrap">
+        <div id="top-status"></div>
+        <small id="last-activity" class="muted"></small>
+      </div>
     </header>
     <section id="view-overview" class="view"></section>
     <section id="view-providers" class="view" hidden></section>

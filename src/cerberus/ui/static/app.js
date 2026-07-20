@@ -1,7 +1,8 @@
 /* Cerberus admin console — read + live-probe only.
    All data enters the DOM via textContent/createElement (never innerHTML), and
-   every network call is a same-origin GET through getJSON(url). No config
-   mutation from here: the lifecycle stays git + the /admin API. */
+   every network call is a same-origin GET through getJSON(url), or the CSRF'd
+   same-origin probe POST. No config mutation from here: the lifecycle stays
+   git + the /admin API. */
 "use strict";
 
 const ENDPOINTS = {
@@ -59,7 +60,7 @@ async function refresh() {
 }
 
 function renderTop() {
-  const { health, status } = STATE;
+  const { health, status, events } = STATE;
   const fusion = status.fusion ? status.fusion.state : "unknown";
   document.getElementById("side-health").replaceChildren(
     el("span", { class: health.status === "ok" ? "pill good" : "pill bad", text: text(health.status) })
@@ -69,6 +70,11 @@ function renderTop() {
     el("span", { class: "pill", text: "release " + text(status.release_id) }),
     el("span", { class: fusion === "healthy" ? "pill good" : "pill", text: "fusion: " + fusion })
   );
+  // the most recent routing event's own timestamp — not a client-side "now"
+  const latest = (events || [])[0];
+  document.getElementById("last-activity").textContent = latest && latest.timestamp
+    ? "Latest activity " + new Date(latest.timestamp).toLocaleString()
+    : "";
 }
 
 // ---- views ----
@@ -77,16 +83,46 @@ let ACTIVE = "overview";
 
 function renderActive() { VIEWS[ACTIVE](); }
 
+// Tiles for the "what needs attention" hero — every value traces to a field
+// already fetched this refresh; nothing here is inferred or fabricated.
+function computeAttention() {
+  const { health, status, providers, events } = STATE;
+  const cooled = (health.cooldowns || []).length;
+  const unconfigured = providers.filter((p) => !p.configured).length;
+  const failed = events.filter((e) => e.outcome !== "success").length;
+  const fusionReady = status.fusion && status.fusion.state === "configured";
+  return [
+    tile("Providers cooled down", cooled, cooled ? "throttled, next candidate takes over" : "all providers live", cooled ? "warn" : "good"),
+    tile("Unconfigured providers", unconfigured, unconfigured ? "missing an api key" : "every provider has a key", unconfigured ? "danger" : "good"),
+    tile("Failed routing", failed, `of ${events.length} recent events`, failed ? "warn" : "good"),
+    tile("Fusion worker", fusionReady ? "Ready" : "Off", `${((status.fusion && status.fusion.aliases) || []).length} alias(es)`, fusionReady ? "good" : "info"),
+  ];
+}
+
+function renderHero() {
+  return el("div", { class: "hero" },
+    el("div", { class: "hero-top" },
+      el("div", null,
+        el("div", { class: "eyebrow", text: "Live attention surface" }),
+        el("h2", { text: "What needs attention on Cerberus" }),
+        el("p", { text: "Cooled-down and unconfigured providers, recent routing failures, and fusion readiness — pulled live on every refresh." })
+      ),
+      el("button", { class: "btn", text: "Refresh", onClick: refresh })
+    ),
+    el("div", { class: "tiles", attrs: { style: "margin-bottom:0" } }, ...computeAttention())
+  );
+}
+
 function renderOverview() {
   const v = document.getElementById("view-overview");
   const { config, providers, events, health } = STATE;
   const aliasCount = Object.keys(config.aliases || {}).length;
   const configured = providers.filter((p) => p.configured).length;
   const cooled = providers.filter((p) => p.cooled_down).length;
-  const tiles = el("div", { class: "tiles" },
+  const summaryTiles = el("div", { class: "tiles" },
     tile("Providers", providers.length, `${configured} configured`),
     tile("Aliases", aliasCount, "routing policies"),
-    tile("Cooled down", cooled, cooled ? "provider(s) throttled" : "all live", cooled ? "warnc" : "ok"),
+    tile("Cooled down", cooled, cooled ? "provider(s) throttled" : "all live", cooled ? "warn" : "good"),
     tile("Events", events.length, "recent routing")
   );
   const cooldowns = (health.cooldowns || []);
@@ -99,12 +135,14 @@ function renderOverview() {
         )
       : el("p", { class: "muted", text: "None — every provider is live." })
   );
-  v.replaceChildren(tiles, cdSection);
+  v.replaceChildren(renderHero(), el("h2", { class: "section", text: "Snapshot" }), summaryTiles, cdSection);
 }
 
-function tile(label, n, sub, cls) {
-  return el("div", { class: "tile" },
-    el("small", { text: label }), el("div", { class: "n" + (cls ? " " + cls : ""), text: String(n) }),
+// tone: null | 'good' | 'warn' | 'danger' | 'info' — tints the whole tile,
+// same vocabulary as .pill's good/warn/bad/accent
+function tile(label, n, sub, tone) {
+  return el("div", { class: "tile" + (tone ? " " + tone : "") },
+    el("small", { text: label }), el("div", { class: "n", text: String(n) }),
     el("small", { text: sub }));
 }
 

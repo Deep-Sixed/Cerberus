@@ -10,10 +10,12 @@ small{color:var(--muted)}
 code{font-family:ui-monospace,monospace;font-size:.82em;color:#c5d4e8}
 
 /* sidebar */
-#side{background:var(--panel2);border-right:1px solid var(--border);padding:1rem .75rem;display:flex;flex-direction:column;gap:.15rem}
+#side{background:var(--panel2);border-right:1px solid var(--border);padding:1rem .75rem;display:flex;flex-direction:column;gap:.1rem}
 .brand{display:flex;gap:.6rem;align-items:center;padding:.25rem .5rem 1rem}
 .brand .logo{width:34px;height:34px;border-radius:8px;background:var(--accent);color:#04101f;font-weight:800;display:grid;place-items:center}
 .brand b{font-size:.95rem}.brand small{display:block;font-size:.72rem}
+.navgroup{display:flex;flex-direction:column;gap:.15rem;margin-bottom:.5rem}
+.navgroup h6{font-size:.66rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;padding:.6rem .75rem .2rem;margin:0}
 #side a{padding:.5rem .75rem;border-radius:8px;font-size:.9rem;color:var(--muted)}
 #side a:hover{background:var(--panel);color:var(--text)}
 #side a.active{background:var(--panel);color:var(--text);box-shadow:inset 2px 0 0 var(--accent)}
@@ -24,7 +26,17 @@ code{font-family:ui-monospace,monospace;font-size:.82em;color:#c5d4e8}
 #topbar{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:1.25rem}
 #topbar small{font-size:.7rem;letter-spacing:.08em;text-transform:uppercase}
 #topbar h1{font-size:1.5rem;margin-top:.15rem}
+#top-status-wrap{display:flex;flex-direction:column;align-items:flex-end;gap:.35rem}
 #top-status{display:flex;gap:.5rem;align-items:center}
+#last-activity{font-size:.72rem}
+
+/* hero — "what needs attention" */
+.hero{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:1.25rem 1.5rem;margin-bottom:1.25rem}
+.hero-top{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:.5rem}
+.hero .eyebrow{display:inline-flex;align-items:center;gap:.4rem;font-size:.7rem;color:var(--accent);text-transform:uppercase;letter-spacing:.06em;margin-bottom:.5rem}
+.hero .eyebrow::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--good);box-shadow:0 0 0 3px rgba(62,207,142,.18)}
+.hero h2{font-size:1.15rem;margin-bottom:.3rem}
+.hero p{color:var(--muted);font-size:.85rem;max-width:60ch}
 
 /* pills + badges */
 .pill{display:inline-block;padding:.1rem .55rem;border-radius:999px;font-size:.72rem;border:1px solid var(--border);color:var(--muted)}
@@ -48,6 +60,15 @@ code{font-family:ui-monospace,monospace;font-size:.82em;color:#c5d4e8}
 .tile{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:.9rem 1rem}
 .tile .n{font-size:1.8rem;font-weight:700;margin:.1rem 0}
 .tile small{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em}
+/* tone modifiers — same good/warn/bad/accent language as .pill, tinted for a dark bg */
+.tile.good{background:rgba(62,207,142,.08);border-color:#1c5c44}
+.tile.good .n{color:var(--good)}
+.tile.warn{background:rgba(240,180,41,.08);border-color:#5c4a17}
+.tile.warn .n{color:var(--warn)}
+.tile.danger{background:rgba(240,85,108,.08);border-color:#5c2530}
+.tile.danger .n{color:var(--bad)}
+.tile.info{background:rgba(91,156,245,.08);border-color:#22456e}
+.tile.info .n{color:var(--accent)}
 
 /* tables */
 table{width:100%;border-collapse:collapse;font-size:.82rem;background:var(--panel);border-radius:12px;overflow:hidden;border:1px solid var(--border)}
