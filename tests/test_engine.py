@@ -130,3 +130,74 @@ def test_snapshot_reports_remaining_seconds_and_scope():
     entry = snapshot[0]
     assert entry["scope"] == "model" and entry["reason"] == "quota_429"
     assert 0 < entry["seconds_remaining"] <= 60
+
+
+# --- per-candidate reasoning_effort injection (2026-08-17) ---------------------
+# Hindsight cannot send reasoning_effort for this route: it only emits the
+# parameter for models NAMED gpt-5/o1/o3, and it addresses the route by the alias
+# "cerberus/legacy-recovery". These tests pin the injection contract.
+
+def _target(**kw):
+    from cerberus.router.engine import Target
+
+    base = dict(
+        provider_id="gemini", credential_id="main", model="gemini-3.6-flash",
+        cost_tier="free", base_url="https://example.invalid/v1",
+        api_key_env="GEMINI_API_KEY", quota_cooldown_seconds=60,
+        transport_cooldown_seconds=30, quota_scope="provider",
+    )
+    base.update(kw)
+    return Target(**base)
+
+
+def _built_body(target, body):
+    import httpx
+
+    from cerberus.egress.client import build_upstream_request
+
+    with httpx.Client() as client:
+        request = build_upstream_request(client, target, body, "k")
+    import json as _json
+
+    return _json.loads(request.content)
+
+
+def test_reasoning_effort_absent_leaves_body_untouched():
+    """Default behaviour must be byte-identical to before the feature existed."""
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+    built = _built_body(_target(), body)
+    assert "reasoning_effort" not in built
+
+
+def test_reasoning_effort_injected_when_configured():
+    built = _built_body(_target(reasoning_effort="minimal"),
+                        {"messages": [{"role": "user", "content": "hi"}]})
+    assert built["reasoning_effort"] == "minimal"
+
+
+def test_caller_value_is_not_silently_overwritten():
+    """A caller that states its own budget keeps it unless the route claims priority."""
+    built = _built_body(_target(reasoning_effort="minimal"),
+                        {"messages": [], "reasoning_effort": "high"})
+    assert built["reasoning_effort"] == "high"
+
+
+def test_route_wins_only_with_explicit_override():
+    built = _built_body(_target(reasoning_effort="minimal", reasoning_effort_override=True),
+                        {"messages": [], "reasoning_effort": "high"})
+    assert built["reasoning_effort"] == "minimal"
+
+
+def test_effort_is_attributable_in_telemetry():
+    assert "reasoning_effort" not in _target().describe()
+    assert _target(reasoning_effort="low").describe()["reasoning_effort"] == "low"
+
+
+def test_telemetry_event_carries_effective_reasoning_effort():
+    """describe() alone was insufficient: _event builds RoutingEvent from explicit
+    fields, so the injected budget must be threaded there or attribution is lost."""
+    from cerberus.telemetry.emitter import RoutingEvent
+
+    fields = RoutingEvent.__dataclass_fields__
+    assert "reasoning_effort" in fields
+    assert fields["reasoning_effort"].default is None  # absent -> nothing claimed

@@ -74,6 +74,7 @@ def _event(
         provider=target.provider_id if target else None,
         mode=mode,
         model=target.model if target else None,
+        reasoning_effort=target.reasoning_effort if target else None,
         used_fallback=fallback,
         credential=target.credential_id if target else None,
         cost_tier=target.cost_tier if target else None,

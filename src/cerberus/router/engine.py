@@ -23,12 +23,19 @@ class Target:
     quota_cooldown_seconds: int
     transport_cooldown_seconds: int
     quota_scope: str
+    reasoning_effort: str | None = None
+    reasoning_effort_override: bool = False
 
     def replace_cost_tier(self, cost_tier: CostTier) -> "Target":
         return replace(self, cost_tier=cost_tier)
 
     def describe(self) -> dict:
-        return {"provider": self.provider_id, "credential": self.credential_id, "model": self.model}
+        described = {"provider": self.provider_id, "credential": self.credential_id, "model": self.model}
+        # Surfaced in telemetry only when configured, so later cost/quality
+        # evidence is attributable to the reasoning budget actually used.
+        if self.reasoning_effort is not None:
+            described["reasoning_effort"] = self.reasoning_effort
+        return described
 
 
 def ordered_targets(config: CerberusConfig, alias_name: str) -> list[Target]:
@@ -49,6 +56,8 @@ def ordered_targets(config: CerberusConfig, alias_name: str) -> list[Target]:
                 quota_cooldown_seconds=provider.quota_cooldown_seconds,
                 transport_cooldown_seconds=provider.transport_cooldown_seconds,
                 quota_scope=provider.quota_scope,
+                reasoning_effort=candidate.reasoning_effort,
+                reasoning_effort_override=candidate.reasoning_effort_override,
             )
         )
     return targets

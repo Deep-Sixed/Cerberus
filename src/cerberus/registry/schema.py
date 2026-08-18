@@ -185,6 +185,23 @@ class Candidate(BaseModel):
     # fusion panels only: a per-seat system prompt (the member's assigned stance).
     # Ignored outside a fusion alias's candidate/judge list.
     role: str | None = Field(default=None, min_length=1)
+    # Optional per-candidate reasoning budget, injected into the upstream body.
+    # Absent means "send nothing": the provider's own default applies and
+    # behaviour is identical to before this field existed.
+    #
+    # Why it lives here: Hindsight only emits reasoning_effort for models whose
+    # NAME matches gpt-5/o1/o3, and it addresses this route by the alias
+    # "cerberus/legacy-recovery", so the parameter never reaches Gemini.
+    # Measured 2026-08-17 on ONE extraction-shaped prompt: default spent 772
+    # thinking tokens against 136 visible output at 6.6s, while minimal and low
+    # reported none at ~1.5s. Google bills thinking as output, so this is a real
+    # cost and latency lever — but a single observation must not be generalised
+    # to a whole corpus.
+    reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
+    # A caller that sets reasoning_effort itself keeps it unless the route
+    # explicitly claims precedence. Silently overwriting a caller's stated
+    # reasoning budget would hide the substitution from whoever asked for it.
+    reasoning_effort_override: bool = False
 
     def key(self) -> tuple[str, str, str]:
         return (self.provider, self.credential, self.model)

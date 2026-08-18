@@ -80,5 +80,12 @@ def build_upstream_request(
     client: httpx.AsyncClient, target: Target, body: dict[str, Any], api_key: str
 ) -> httpx.Request:
     upstream_body = {**body, "model": target.model}
+    # Optional per-candidate reasoning budget. Absent -> nothing is added and the
+    # body is exactly what it was before this feature existed. Present -> injected
+    # only when the caller did not state one, unless the route explicitly claims
+    # precedence, so a caller's stated budget is never silently replaced.
+    if target.reasoning_effort is not None:
+        if "reasoning_effort" not in upstream_body or target.reasoning_effort_override:
+            upstream_body["reasoning_effort"] = target.reasoning_effort
     headers = {"content-type": "application/json", "authorization": f"Bearer {api_key}"}
     return client.build_request("POST", target.base_url + "/chat/completions", headers=headers, json=upstream_body)

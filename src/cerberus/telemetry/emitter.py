@@ -72,6 +72,10 @@ class RoutingEvent:
     cost_tier: str | None = None
     candidates: list[str] | None = None
     exclusions: list[dict[str, Any]] | None = None
+    # Effective reasoning budget injected by the route, so later cost and
+    # quality evidence is attributable to the setting actually used. None
+    # when the route injects nothing (the provider default applied).
+    reasoning_effort: str | None = None
     schema_version: int = SCHEMA_VERSION
 
     def as_payload(self) -> dict[str, Any]:
@@ -79,6 +83,7 @@ class RoutingEvent:
             "schema_version": self.schema_version,
             "request_id": self.request_id,
             "alias": self.alias,
+            "reasoning_effort": self.reasoning_effort,
             "identity": self.identity,
             "config_version": self.config_version,
             "provider": self.provider,
@@ -132,6 +137,11 @@ class TelemetryEmitter:
         self._dropped_events = 0
         self._last_drop_warning_at: float | None = None
         self._last_failure_warning_at: float | None = None
+        self._consecutive_failures = 0
+        self._last_error: str | None = None
+        self._last_status_code: int | None = None
+        self._last_error_at: str | None = None
+        self._last_success_at: str | None = None
 
     @property
     def dropped_events(self) -> int:
@@ -160,6 +170,27 @@ class TelemetryEmitter:
 
         return copy.deepcopy(list(reversed(self._recent)))
 
+    def health_snapshot(self) -> dict[str, Any]:
+        """Return delivery health without exposing endpoint, credential, or event data."""
+
+        if self._client is None:
+            status = "disabled"
+        elif self._consecutive_failures:
+            status = "degraded"
+        elif self._last_success_at is not None:
+            status = "healthy"
+        else:
+            status = "pending"
+        return {
+            "status": status,
+            "last_error": self._last_error,
+            "last_status_code": self._last_status_code,
+            "consecutive_failures": self._consecutive_failures,
+            "last_error_at": self._last_error_at,
+            "last_success_at": self._last_success_at,
+            "dropped_events": self._dropped_events,
+        }
+
     def emit(self, event: RoutingEvent) -> None:
         # snapshot at emit time: later mutation of attempt/exclusion objects by
         # the request path must not rewrite an already-recorded event
@@ -180,7 +211,7 @@ class TelemetryEmitter:
             try:
                 await self._post(payload)
             except Exception:  # pragma: no cover - defensive worker boundary
-                self._warn_delivery_failure()
+                self._record_delivery_failure("internal_error")
             finally:
                 self._in_flight = False
                 self._queue.task_done()
@@ -192,6 +223,7 @@ class TelemetryEmitter:
             assert self._token_file is not None
             token = self._token_file.read_text(encoding="utf-8").strip()
             if not token:
+                self._record_delivery_failure("missing_bearer")
                 return
             response = await self._client.post(
                 self._endpoint,
@@ -199,9 +231,24 @@ class TelemetryEmitter:
                 json=payload,
             )
             response.raise_for_status()
-        except (OSError, UnicodeError, httpx.HTTPError):
-            self._warn_delivery_failure()
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            self._record_delivery_failure(
+                f"http_{status_code}",
+                status_code=status_code,
+                persistent=400 <= status_code < 500,
+            )
             return
+        except httpx.RequestError:
+            self._record_delivery_failure("transport_error")
+            return
+        except (OSError, UnicodeError):
+            self._record_delivery_failure("token_file_error")
+            return
+        except httpx.HTTPError:
+            self._record_delivery_failure("http_error")
+            return
+        self._record_delivery_success()
 
     def _record_drop(self, count: int = 1) -> None:
         self._dropped_events += count
@@ -210,14 +257,39 @@ class TelemetryEmitter:
             self._last_drop_warning_at = now
             logger.warning("Routing telemetry queue full; dropped_events=%d", self._dropped_events)
 
-    def _warn_delivery_failure(self) -> None:
+    def _record_delivery_success(self) -> None:
+        self._consecutive_failures = 0
+        self._last_error = None
+        self._last_status_code = None
+        self._last_error_at = None
+        self._last_success_at = datetime.now(timezone.utc).isoformat()
+        self._last_failure_warning_at = None
+
+    def _record_delivery_failure(
+        self,
+        error: str,
+        *,
+        status_code: int | None = None,
+        persistent: bool = False,
+    ) -> None:
+        self._consecutive_failures += 1
+        self._last_error = error
+        self._last_status_code = status_code
+        self._last_error_at = datetime.now(timezone.utc).isoformat()
         now = time.monotonic()
         if (
             self._last_failure_warning_at is None
             or now - self._last_failure_warning_at >= self._WARNING_INTERVAL_SECONDS
         ):
             self._last_failure_warning_at = now
-            logger.warning("Routing telemetry delivery failed; event data suppressed")
+            log = logger.error if persistent else logger.warning
+            log(
+                "Routing telemetry delivery failed; error=%s status_code=%s "
+                "consecutive_failures=%d event data suppressed",
+                error,
+                status_code,
+                self._consecutive_failures,
+            )
 
     async def close(self) -> None:
         if self._queue is not None and self._worker is not None:
