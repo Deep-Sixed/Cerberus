@@ -7,7 +7,9 @@ belongs to the dispatch loop, not here.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from typing import Any
 
 from cerberus.registry.schema import Alias, CerberusConfig, CostTier
 
@@ -25,16 +27,29 @@ class Target:
     quota_scope: str
     reasoning_effort: str | None = None
     reasoning_effort_override: bool = False
+    # Not hashed anywhere (Target is never a dict key or set member), so a
+    # mutable mapping on a frozen dataclass is safe here.
+    chat_template_kwargs: Mapping[str, Any] | None = None
+    chat_template_kwargs_override: bool = False
 
     def replace_cost_tier(self, cost_tier: CostTier) -> "Target":
         return replace(self, cost_tier=cost_tier)
 
     def describe(self) -> dict:
-        described = {"provider": self.provider_id, "credential": self.credential_id, "model": self.model}
+        described: dict[str, Any] = {
+            "provider": self.provider_id,
+            "credential": self.credential_id,
+            "model": self.model,
+        }
         # Surfaced in telemetry only when configured, so later cost/quality
         # evidence is attributable to the reasoning budget actually used.
         if self.reasoning_effort is not None:
             described["reasoning_effort"] = self.reasoning_effort
+        # Same rationale: a thinking-disabled run and a thinking-enabled run must
+        # be distinguishable after the fact, or their latency and quality numbers
+        # cannot be compared.
+        if self.chat_template_kwargs is not None:
+            described["chat_template_kwargs"] = dict(self.chat_template_kwargs)
         return described
 
 
@@ -58,6 +73,8 @@ def ordered_targets(config: CerberusConfig, alias_name: str) -> list[Target]:
                 quota_scope=provider.quota_scope,
                 reasoning_effort=candidate.reasoning_effort,
                 reasoning_effort_override=candidate.reasoning_effort_override,
+                chat_template_kwargs=candidate.chat_template_kwargs,
+                chat_template_kwargs_override=candidate.chat_template_kwargs_override,
             )
         )
     return targets

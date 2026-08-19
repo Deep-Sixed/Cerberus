@@ -201,3 +201,55 @@ def test_telemetry_event_carries_effective_reasoning_effort():
     fields = RoutingEvent.__dataclass_fields__
     assert "reasoning_effort" in fields
     assert fields["reasoning_effort"].default is None  # absent -> nothing claimed
+
+
+def test_chat_template_kwargs_absent_leaves_body_untouched():
+    """Default must stay byte-identical for every route that does not set it."""
+    built = _built_body(_target(), {"messages": [{"role": "user", "content": "hi"}]})
+    assert "chat_template_kwargs" not in built
+
+
+def test_chat_template_kwargs_injected_when_configured():
+    """The llama.cpp thinking lever: reasoning_effort is ignored there, this is not."""
+    built = _built_body(_target(chat_template_kwargs={"enable_thinking": False}),
+                        {"messages": [{"role": "user", "content": "hi"}]})
+    assert built["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_chat_template_kwargs_caller_value_is_not_silently_overwritten():
+    built = _built_body(_target(chat_template_kwargs={"enable_thinking": False}),
+                        {"messages": [], "chat_template_kwargs": {"enable_thinking": True}})
+    assert built["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_chat_template_kwargs_route_wins_only_with_explicit_override():
+    built = _built_body(
+        _target(chat_template_kwargs={"enable_thinking": False}, chat_template_kwargs_override=True),
+        {"messages": [], "chat_template_kwargs": {"enable_thinking": True}})
+    assert built["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_chat_template_kwargs_is_attributable_in_telemetry():
+    """A thinking-off run and a thinking-on run must be distinguishable after the
+    fact, or their latency and quality numbers cannot be compared."""
+    assert "chat_template_kwargs" not in _target().describe()
+    described = _target(chat_template_kwargs={"enable_thinking": False}).describe()
+    assert described["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_chat_template_kwargs_config_mapping_is_not_aliased_into_the_body():
+    """Mutating the built body must never reach back into the route's config."""
+    configured = {"enable_thinking": False}
+    built = _built_body(_target(chat_template_kwargs=configured), {"messages": []})
+    built["chat_template_kwargs"]["enable_thinking"] = True
+    assert configured == {"enable_thinking": False}
+
+
+def test_both_levers_are_independent():
+    """A route may need reasoning_effort for one backend and chat_template_kwargs
+    for another; setting one must never imply or suppress the other."""
+    built = _built_body(
+        _target(reasoning_effort="minimal", chat_template_kwargs={"enable_thinking": False}),
+        {"messages": []})
+    assert built["reasoning_effort"] == "minimal"
+    assert built["chat_template_kwargs"] == {"enable_thinking": False}

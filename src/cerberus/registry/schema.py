@@ -7,7 +7,7 @@ authorization is allow-list only, and unknown keys are rejected everywhere.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
@@ -202,6 +202,22 @@ class Candidate(BaseModel):
     # explicitly claims precedence. Silently overwriting a caller's stated
     # reasoning budget would hide the substitution from whoever asked for it.
     reasoning_effort_override: bool = False
+    # Optional per-candidate chat-template arguments, injected into the upstream
+    # body. Absent means "send nothing", exactly as with reasoning_effort.
+    #
+    # Why this exists alongside reasoning_effort rather than reusing it: they are
+    # not interchangeable. llama.cpp IGNORES reasoning_effort outright — measured
+    # 2026-08-19 against gemma-4 E2B, where minimal produced byte-identical output
+    # and the same 524 completion tokens as the default. The lever llama.cpp does
+    # honour is chat_template_kwargs {"enable_thinking": false}, measured on
+    # gemma-4 12B (Thanatos) at 4.1s/184 tokens against 20.1s/929 tokens with
+    # thinking on — a ~5x latency difference across a 2492-document corpus.
+    # As with reasoning_effort, one prompt is not a corpus.
+    chat_template_kwargs: dict[str, Any] | None = None
+    # Same precedence rule as reasoning_effort: a caller that states its own
+    # chat_template_kwargs keeps them unless the route explicitly claims
+    # precedence, so a substitution is never silent.
+    chat_template_kwargs_override: bool = False
 
     def key(self) -> tuple[str, str, str]:
         return (self.provider, self.credential, self.model)

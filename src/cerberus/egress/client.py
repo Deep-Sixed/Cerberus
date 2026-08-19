@@ -87,5 +87,12 @@ def build_upstream_request(
     if target.reasoning_effort is not None:
         if "reasoning_effort" not in upstream_body or target.reasoning_effort_override:
             upstream_body["reasoning_effort"] = target.reasoning_effort
+    # Same contract for chat_template_kwargs, kept as a separate field because
+    # backends honour one or the other, not both: llama.cpp ignores
+    # reasoning_effort entirely and reads this instead. Copied on the way out so
+    # the config's mapping is never aliased into a mutable request body.
+    if target.chat_template_kwargs is not None:
+        if "chat_template_kwargs" not in upstream_body or target.chat_template_kwargs_override:
+            upstream_body["chat_template_kwargs"] = dict(target.chat_template_kwargs)
     headers = {"content-type": "application/json", "authorization": f"Bearer {api_key}"}
     return client.build_request("POST", target.base_url + "/chat/completions", headers=headers, json=upstream_body)
