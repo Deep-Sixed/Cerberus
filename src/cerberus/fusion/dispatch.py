@@ -64,6 +64,7 @@ async def fusion_dispatch(
     document: ConfigDocument,
     backends: dict[str, FusionBackend],
     telemetry: TelemetryEmitter,
+    control_plane: Any | None = None,
 ) -> JSONResponse:
     request_id = str(uuid.uuid4())
     started_at = time.perf_counter()
@@ -98,10 +99,19 @@ async def fusion_dispatch(
                 outcome=outcome,
                 latency_ms=(time.perf_counter() - started_at) * 1000,
                 token_usage=usage,
+                reported_cost=(
+                    float(usage["cost"])
+                    if isinstance(usage, dict)
+                    and isinstance(usage.get("cost"), (int, float))
+                    and not isinstance(usage.get("cost"), bool)
+                    and usage["cost"] >= 0
+                    else None
+                ),
                 timestamp=datetime.now(timezone.utc),
                 streaming=False,
                 identity=identity_name,
                 config_version=document.version,
+                config_checksum=document.checksum,
                 fusion=dict(fusion_record),
             )
         )
@@ -116,7 +126,8 @@ async def fusion_dispatch(
 
     backend = backends.get(policy.backend)
     base_url, api_key = _credential_for(document.config, alias)
-    if backend is None or not api_key:
+    provider_available = control_plane is None or control_plane.provider_available(judge.provider)
+    if backend is None or not api_key or not provider_available:
         emit(outcome="fusion_unavailable", http_status=503, attempts=[], usage=None)
         return error(503, "Fusion backend not configured")
 
@@ -178,6 +189,7 @@ async def fusion_dispatch(
             "judge": f"{judge.provider}/{judge.model}",
             "outer": f"{policy.outer_model.provider}/{policy.outer_model.model}",
             "config_version": document.version,
+            "config_checksum": document.checksum,
         },
     }
     return JSONResponse(content=payload, status_code=200, headers={"x-request-id": request_id})

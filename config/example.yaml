@@ -1,6 +1,6 @@
 # Cerberus container default configuration (mounted at /etc/cerberus/config.yaml).
-# Replaces the retired MetaRouter v3 donor config: this file validates against
-# the Cerberus registry schema. Secrets are env-var NAMES resolved by the
+# This file validates against the Cerberus registry schema. Secrets are env-var
+# NAMES resolved by the
 # entrypoint file-secrets bridge (/run/secrets/*); never values.
 metadata:
   version: cerberus-2026-07-17.2

@@ -130,8 +130,8 @@ def test_candidate_cost_tier_restatement_must_match_registry():
 
 def test_alias_names_must_carry_cerberus_prefix():
     raw = make()
-    raw["aliases"]["metarouter/free"] = raw["aliases"].pop("cerberus/free")
-    raw["identities"]["recon"]["allowed_aliases"] = ["metarouter/free"]
+    raw["aliases"]["legacy/free"] = raw["aliases"].pop("cerberus/free")
+    raw["identities"]["recon"]["allowed_aliases"] = ["legacy/free"]
     with pytest.raises(ValidationError, match="cerberus/"):
         CerberusConfig.model_validate(raw)
 

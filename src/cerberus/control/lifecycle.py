@@ -9,15 +9,27 @@ connection on its behalf.
 
 from __future__ import annotations
 
+from typing import Protocol
+
 from cerberus.registry.loader import ConfigDocument, load_config_document
 
 
+class ControlRepository(Protocol):
+    def bootstrap(self, initial: ConfigDocument) -> ConfigDocument: ...
+    def revision_checksums(self) -> dict[str, str]: ...
+    def register(self, document: ConfigDocument) -> None: ...
+    def activate(self, document: ConfigDocument, *, action: str = "activate") -> None: ...
+
+
 class ConfigLifecycle:
-    def __init__(self, initial: ConfigDocument) -> None:
-        self._active = initial
+    def __init__(self, initial: ConfigDocument, repository: ControlRepository | None = None) -> None:
+        self._repository = repository
+        self._active = repository.bootstrap(initial) if repository is not None else initial
         self._history: list[ConfigDocument] = []
         self._shadow: ConfigDocument | None = None
-        self._version_checksums = {initial.version: initial.checksum}
+        self._version_checksums = (
+            repository.revision_checksums() if repository is not None else {initial.version: initial.checksum}
+        )
 
     @property
     def active(self) -> ConfigDocument:
@@ -38,10 +50,14 @@ class ConfigLifecycle:
                 f"candidate checksum is {document.checksum}"
             )
         self._version_checksums.setdefault(document.version, document.checksum)
+        if self._repository is not None:
+            self._repository.register(document)
         return document
 
     def activate(self, path: str) -> ConfigDocument:
         document = self.validate(path)
+        if self._repository is not None:
+            self._repository.activate(document)
         self._history.append(self._active)
         self._active = document  # atomic swap: single reference assignment
         return document
@@ -49,7 +65,10 @@ class ConfigLifecycle:
     def rollback(self) -> ConfigDocument:
         if not self._history:
             raise LookupError("no prior configuration to roll back to")
-        self._active = self._history.pop()
+        restored = self._history.pop()
+        if self._repository is not None:
+            self._repository.activate(restored, action="rollback")
+        self._active = restored
         return self._active
 
     def arm_shadow(self, path: str | None) -> ConfigDocument | None:
@@ -76,4 +95,5 @@ class ConfigLifecycle:
                 else None
             ),
             "rollback_depth": len(self._history),
+            "storage": "sqlite" if self._repository is not None else "memory",
         }

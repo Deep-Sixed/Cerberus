@@ -1,8 +1,7 @@
 """OpenAI-compatible upstream call helpers and streaming usage extraction.
 
-The streaming collector and usage parsing are transplanted verbatim from the
-donor (MetaRouter v3 app.py, commit 14cb770) — behavior-preserving by design;
-see docs/architecture.md for the gateway boundary.
+The streaming collector and usage parser preserve the established Cerberus
+wire contract; see docs/architecture.md for the gateway boundary.
 """
 
 from __future__ import annotations
@@ -39,6 +38,18 @@ def token_usage(body: dict[str, Any]) -> dict[str, int] | None:
     return safe_usage or None
 
 
+def reported_cost(body: dict[str, Any]) -> float | None:
+    """Return an upstream-reported cost without consulting a bundled price list."""
+
+    usage = body.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    value = usage.get("cost")
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return float(value)
+    return None
+
+
 class StreamingUsageCollector:
     """Extract usage-only SSE fields without retaining response content."""
 
@@ -47,6 +58,7 @@ class StreamingUsageCollector:
     def __init__(self) -> None:
         self._buffer = b""
         self.usage: dict[str, int] | None = None
+        self.reported_cost: float | None = None
 
     def feed(self, chunk: bytes) -> None:
         self._buffer += chunk
@@ -72,8 +84,11 @@ class StreamingUsageCollector:
             body = json.loads(payload)
         except (json.JSONDecodeError, UnicodeDecodeError):
             return
-        if isinstance(body, dict) and (usage := token_usage(body)) is not None:
-            self.usage = usage
+        if isinstance(body, dict):
+            if (usage := token_usage(body)) is not None:
+                self.usage = usage
+            if (cost := reported_cost(body)) is not None:
+                self.reported_cost = cost
 
 
 def build_upstream_request(

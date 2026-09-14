@@ -164,6 +164,7 @@ async def test_fusion_request_becomes_one_forced_openrouter_fusion_call(monkeypa
         "judge": "openrouter/free-a",
         "outer": "openrouter/free-a",
         "config_version": "cerberus-2026-09-14.1",
+        "config_checksum": app.state.lifecycle.active.checksum,
     }
 
 

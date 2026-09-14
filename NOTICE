@@ -1,7 +1,3 @@
-Cerberus evolved from MetaRouter v3 (the MetaRouter v4 lineage).
-MetaRouter v3 used an earlier open-source Claude Code proxy project as an
-architectural reference only; no source files were copied from it, so nothing
-from that project is redistributed here.
 Cerberus copyright and MIT license are in LICENSE.
 
 Fusion mode delegates deliberation to OpenRouter's Fusion Router, an external

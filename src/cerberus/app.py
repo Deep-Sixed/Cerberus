@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 from pydantic import ValidationError
 
 from cerberus import __version__
-from cerberus.control import ConfigLifecycle
+from cerberus.control import ConfigLifecycle, SqliteControlPlane
 from cerberus.control.admin_fields import apply_updates, build_schema, stage
 from cerberus.identity import (
     AuthentikVerifier,
@@ -142,9 +142,10 @@ def create_app(
     else:
         document = _document_for(config)
 
-    lifecycle = ConfigLifecycle(document)
-    boot_config = document.config  # infrastructure bindings: fixed at boot
-    state_path = boot_config.state.path
+    state_path = document.config.state.path
+    control_plane = SqliteControlPlane(state_path) if state_path else None
+    lifecycle = ConfigLifecycle(document, repository=control_plane)
+    boot_config = lifecycle.active.config  # infrastructure bindings: fixed at boot
     store = SqliteCooldownStore(state_path) if state_path else InMemoryCooldownStore()
     # staged candidate configs from the browser editor land here — the same
     # writable volume as the state DB in production; a tmp fallback keeps
@@ -156,6 +157,7 @@ def create_app(
         boot_config.telemetry,
         telemetry_transport,
         release_id=_release_id(),
+        local_store=control_plane,
     )
     # fail at boot, not first request, if packaging dropped the dashboard assets
     admin_ui_assets = {
@@ -192,6 +194,11 @@ def create_app(
                 await verifier.aclose()
             if admin_sso is not None:
                 await admin_sso.aclose()
+            close_store = getattr(store, "close", None)
+            if close_store is not None:
+                close_store()
+            if control_plane is not None:
+                control_plane.close()
 
     # The built-in doc routes are unconditionally public, so they are disabled here
     # and re-served below through admin_gate (unless server.public_docs opts out).
@@ -206,6 +213,7 @@ def create_app(
     )
     app.state.lifecycle = lifecycle
     app.state.cooldowns = store
+    app.state.control_plane = control_plane
 
     async def resolve(request: Request, config: CerberusConfig) -> IdentityContext | None:
         static = resolve_identity(config, request)
@@ -258,6 +266,7 @@ def create_app(
             "telemetry": telemetry.health_snapshot(),
             "config_version": active.version,
             "config_checksum": active.checksum,
+            "control_plane": control_plane.status() if control_plane is not None else {"storage": "memory"},
             "cooldowns": store.snapshot(),
         }
 
@@ -593,6 +602,13 @@ def create_app(
             else:
                 resp = await client.get(f"{base}/models", headers=auth, timeout=10.0)
             latency_ms = round((time.perf_counter() - started) * 1000, 1)
+            if control_plane is not None:
+                control_plane.set_provider_health(
+                    name,
+                    "healthy" if resp.status_code < 500 else "degraded",
+                    latency_ms=latency_ms,
+                    detail=f"http_{resp.status_code}",
+                )
             return JSONResponse(
                 content={
                     "ok": resp.status_code < 400,
@@ -603,6 +619,8 @@ def create_app(
                 headers=_ADMIN_UI_HEADERS,
             )
         except httpx.HTTPError as exc:
+            if control_plane is not None:
+                control_plane.set_provider_health(name, "down", detail=type(exc).__name__)
             return JSONResponse(
                 content={"ok": False, "reason": type(exc).__name__}, headers=_ADMIN_UI_HEADERS
             )
@@ -694,7 +712,11 @@ def create_app(
             if context is not None and "free" not in context.identity.allowed_modes:
                 telemetry.emit(
                     unauthorized_event(
-                        alias_name=alias_name, mode="free", identity=context.name, config_version=document.version
+                        alias_name=alias_name,
+                        mode="free",
+                        identity=context.name,
+                        config_version=document.version,
+                        config_checksum=document.checksum,
                     )
                 )
                 return JSONResponse(
@@ -719,6 +741,7 @@ def create_app(
                             mode=alias.mode,
                             identity=context.name,
                             config_version=document.version,
+                            config_checksum=document.checksum,
                         )
                     )
                     return JSONResponse(
@@ -746,6 +769,7 @@ def create_app(
                 document=document,
                 backends=fusion_backends,
                 telemetry=telemetry,
+                control_plane=control_plane,
             )
         return await dispatch(
             body=body,
@@ -755,6 +779,7 @@ def create_app(
             store=store,
             client=request.app.state.http_client,
             telemetry=telemetry,
+            control_plane=control_plane,
         )
 
     return app

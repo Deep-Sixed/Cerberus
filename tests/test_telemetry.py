@@ -1,8 +1,7 @@
 """Telemetry behavior — redaction, usage capture, bounded queue, non-blocking emission.
 
-Donor scenarios (MetaRouter v3) ported onto the Cerberus schema: the event's
-request_type field carries the alias and pool carries the mode until the S8
-schema overhaul.
+Routing scenarios exercise the Cerberus event contract, redaction boundary and
+snapshot attribution.
 """
 
 import asyncio
@@ -94,7 +93,7 @@ async def test_non_streaming_event_is_redacted_and_includes_usage(monkeypatch, t
     assert len(events) == 1
     assert events[0].headers["authorization"] == "Bearer telemetry-test-value"
     event = json.loads(events[0].content)
-    assert event["schema_version"] == 4
+    assert event["schema_version"] == 5
     assert event["alias"] == "cerberus/controlled"
     assert event["attempts"][0]["used_fallback"] is False
     assert event["attempts"][0]["cooldown_scope"] is None

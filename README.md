@@ -1,14 +1,13 @@
 # Cerberus 0.01
 
-Cerberus is a policy gateway with an OpenAI-compatible chat-completions API,
-identity-based routing, free-only selection, configuration management, an admin
-console, and a Fusion mode that delegates multi-model deliberation to a managed
-external backend under Cerberus policy.
+Cerberus is an AI service router with stable logical addressing over changing
+providers, models and composed inference paths. Its OpenAI-compatible API exposes
+policy-bearing aliases for dedicated services and Fusion routes; clients bind to
+those aliases without depending on provider topology.
 
-Lineage: **MetaRouter v3 → MetaRouter v4 / Cerberus**. The public product version
-is **0.01**. MetaRouter v4 describes ancestry, not the release number. Python
-packaging normalizes `0.01` to `0.1` in distribution metadata and filenames;
-release names and this product's version declaration remain `0.01`.
+The public product version is **0.01**. Python packaging normalizes `0.01` to
+`0.1` in distribution metadata and filenames; release names and this product's
+version declaration remain `0.01`.
 See [Python version normalization](https://packaging.python.org/en/latest/specifications/version-specifiers/#integer-normalization).
 
 ## Development
@@ -78,6 +77,19 @@ Requirements and caveats:
   aliases keep working.
 - Per-seat persona prompts from the earlier bundled worker are not available;
   the panel answers the caller's prompt directly.
+
+## Dispatch
+
+Dispatch resolves a stable Cerberus alias through a validated, identity-scoped
+route revision. Dedicated aliases forward to an ordered provider/model path;
+Fusion aliases resolve to a configured multi-model composition. Health and
+cooldowns may remove configured paths from eligibility, but can never introduce
+a path absent from the request's pinned revision.
+
+When `state.path` is configured, validated revisions are materialized in SQLite
+and activation updates one atomic current-revision pointer. Requests read an
+immutable in-memory snapshot; routing events and usage projections are persisted
+as operational records without storing provider or client secret values.
 
 See [architecture](docs/architecture.md), [persistence](docs/persistence.md),
 and [security](SECURITY.md).

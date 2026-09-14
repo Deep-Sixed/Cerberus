@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import logging
 from pathlib import Path
 import time
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import httpx
 
@@ -17,7 +17,7 @@ from ..registry.schema import TelemetryConfig
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 AttemptOutcome = Literal[
     "missing_credentials",
     "transport_error",
@@ -68,8 +68,10 @@ class RoutingEvent:
     streaming: bool
     identity: str | None = None
     config_version: str | None = None
+    config_checksum: str | None = None
     credential: str | None = None
     cost_tier: str | None = None
+    reported_cost: float | None = None
     candidates: list[str] | None = None
     exclusions: list[dict[str, Any]] | None = None
     # Effective reasoning budget injected by the route, so later cost and
@@ -91,11 +93,16 @@ class RoutingEvent:
             "fusion": self.fusion,
             "identity": self.identity,
             "config_version": self.config_version,
+            "config_checksum": self.config_checksum,
             "provider": self.provider,
             "credential": self.credential,
+            "credential_ref": (
+                f"{self.provider}/{self.credential}" if self.provider is not None and self.credential is not None else None
+            ),
             "mode": self.mode,
             "model": self.model,
             "cost_tier": self.cost_tier,
+            "reported_cost": self.reported_cost,
             "candidates": self.candidates,
             "exclusions": self.exclusions,
             "used_fallback": self.used_fallback,
@@ -110,6 +117,10 @@ class RoutingEvent:
         }
 
 
+class RoutingEventStore(Protocol):
+    def record_routing_event(self, payload: dict[str, Any]) -> None: ...
+
+
 class TelemetryEmitter:
     """Send routing events without putting telemetry on the inference critical path."""
 
@@ -122,10 +133,12 @@ class TelemetryEmitter:
         *,
         release_id: str,
         recent_capacity: int = 50,
+        local_store: RoutingEventStore | None = None,
     ) -> None:
         if not release_id:
             raise ValueError("release_id must be a nonempty release identifier")
         self._release_id = release_id
+        self._local_store = local_store
         self._recent: deque[dict[str, Any]] = deque(maxlen=recent_capacity)
         self._endpoint = str(config.endpoint) if config.endpoint is not None else None
         self._token_file = Path(config.bearer_token_file) if config.bearer_token_file is not None else None
@@ -161,7 +174,7 @@ class TelemetryEmitter:
     async def start(self) -> None:
         """Start the single bounded delivery worker inside the application lifespan."""
 
-        if self._client is None or self._worker is not None:
+        if (self._client is None and self._local_store is None) or self._worker is not None:
             return
         self._queue = asyncio.Queue(maxsize=self._queue_capacity)
         self._worker = asyncio.create_task(self._drain(), name="cerberus-telemetry")
@@ -178,7 +191,7 @@ class TelemetryEmitter:
     def health_snapshot(self) -> dict[str, Any]:
         """Return delivery health without exposing endpoint, credential, or event data."""
 
-        if self._client is None:
+        if self._client is None and self._local_store is None:
             status = "disabled"
         elif self._consecutive_failures:
             status = "degraded"
@@ -201,7 +214,7 @@ class TelemetryEmitter:
         # the request path must not rewrite an already-recorded event
         payload = copy.deepcopy({**event.as_payload(), "release_id": self._release_id})
         self._recent.append(payload)
-        if self._client is None or self._queue is None:
+        if self._queue is None:
             return
         try:
             self._queue.put_nowait(payload)
@@ -214,7 +227,12 @@ class TelemetryEmitter:
             payload = await self._queue.get()
             self._in_flight = True
             try:
-                await self._post(payload)
+                if self._local_store is not None:
+                    await asyncio.to_thread(self._local_store.record_routing_event, payload)
+                if self._client is not None:
+                    await self._post(payload)
+                else:
+                    self._record_delivery_success()
             except Exception:  # pragma: no cover - defensive worker boundary
                 self._record_delivery_failure("internal_error")
             finally:

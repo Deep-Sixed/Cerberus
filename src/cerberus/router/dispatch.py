@@ -20,6 +20,7 @@ from cerberus.egress.client import (
     RETRYABLE_STATUS_CODES,
     StreamingUsageCollector,
     build_upstream_request,
+    reported_cost,
     retry_after_seconds,
     token_usage,
 )
@@ -65,8 +66,10 @@ def _event(
     fallback: bool,
     identity: str | None,
     config_version: str | None = None,
+    config_checksum: str | None = None,
     candidates: list[str] | None = None,
     exclusions: list[dict] | None = None,
+    upstream_reported_cost: float | None = None,
 ) -> RoutingEvent:
     return RoutingEvent(
         request_id=request_id,
@@ -78,6 +81,7 @@ def _event(
         used_fallback=fallback,
         credential=target.credential_id if target else None,
         cost_tier=target.cost_tier if target else None,
+        reported_cost=upstream_reported_cost,
         candidates=candidates,
         exclusions=exclusions,
         attempts=attempts,
@@ -89,11 +93,17 @@ def _event(
         streaming=streaming,
         identity=identity,
         config_version=config_version,
+        config_checksum=config_checksum,
     )
 
 
 def unauthorized_event(
-    *, alias_name: str, mode: str, identity: str | None, config_version: str | None = None
+    *,
+    alias_name: str,
+    mode: str,
+    identity: str | None,
+    config_version: str | None = None,
+    config_checksum: str | None = None,
 ) -> RoutingEvent:
     return _event(
         request_id=str(uuid.uuid4()),
@@ -109,6 +119,7 @@ def unauthorized_event(
         fallback=False,
         identity=identity,
         config_version=config_version,
+        config_checksum=config_checksum,
     )
 
 
@@ -139,6 +150,7 @@ def shadow_decision_event(
             fallback=False,
             identity=identity,
             config_version=document.version,
+            config_checksum=document.checksum,
         )
     eligible, _exclusions = cost_eligible(alias, ordered_targets(config, alias_name))
     selected: Target | None = None
@@ -163,6 +175,7 @@ def shadow_decision_event(
         fallback=False,
         identity=identity,
         config_version=document.version,
+        config_checksum=document.checksum,
     )
 
 
@@ -175,6 +188,7 @@ async def dispatch(
     store: InMemoryCooldownStore,
     client: httpx.AsyncClient,
     telemetry: TelemetryEmitter,
+    control_plane: Any | None = None,
 ) -> JSONResponse | StreamingResponse:
     request_id = str(uuid.uuid4())
     config = document.config
@@ -189,6 +203,9 @@ async def dispatch(
     attempted = 0
 
     for index, target in enumerate(eligible):
+        if control_plane is not None and not control_plane.provider_available(target.provider_id):
+            exclusions.append({**target.describe(), "reason": "provider_down"})
+            continue
         cooldown = store.active_for(target.provider_id, target.credential_id, target.model)
         if cooldown is not None:
             exclusions.append(
@@ -264,6 +281,7 @@ async def dispatch(
             **target.describe(),
             "attempts": attempted,
             "config_version": document.version,
+            "config_checksum": document.checksum,
         }
 
         if streaming:
@@ -299,10 +317,12 @@ async def dispatch(
                             outcome=outcome,
                             started_at=started_at,
                             usage=collector.usage,
+                            upstream_reported_cost=collector.reported_cost,
                             streaming=True,
                             fallback=used_fallback,
                             identity=identity_name,
                             config_version=document.version,
+                            config_checksum=document.checksum,
                             candidates=ordered,
                             exclusions=list(exclusions),
                         )
@@ -340,6 +360,7 @@ async def dispatch(
                     fallback=used_fallback,
                     identity=identity_name,
                     config_version=document.version,
+                    config_checksum=document.checksum,
                     candidates=ordered,
                     exclusions=list(exclusions),
                 )
@@ -360,10 +381,12 @@ async def dispatch(
                 outcome="success" if 200 <= response.status_code < 400 else "upstream_error",
                 started_at=started_at,
                 usage=token_usage(response_body) if isinstance(response_body, dict) else None,
+                upstream_reported_cost=reported_cost(response_body) if isinstance(response_body, dict) else None,
                 streaming=False,
                 fallback=used_fallback,
                 identity=identity_name,
                 config_version=document.version,
+                config_checksum=document.checksum,
                 candidates=ordered,
                 exclusions=list(exclusions),
             )
@@ -389,6 +412,7 @@ async def dispatch(
             fallback=False,
             identity=identity_name,
             config_version=document.version,
+            config_checksum=document.checksum,
             candidates=ordered,
             exclusions=list(exclusions),
         )
@@ -403,4 +427,3 @@ async def dispatch(
             }
         },
     )
-
