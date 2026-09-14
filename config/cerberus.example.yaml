@@ -47,15 +47,18 @@ aliases:
 
   cerberus/fusion-code:
     mode: fusion
+    # Deliberation is delegated to a managed backend (OpenRouter Fusion Router),
+    # so the whole panel and the judge (analyst) share one provider/credential.
+    # One fusion request is billed as every panel call plus the analyst.
     candidates:                     # the panel
-      - { provider: google, credential: free-1, model: gemini-flash }
       - { provider: openrouter, credential: primary, model: openrouter/free }
+      - { provider: openrouter, credential: primary, model: anthropic/claude-sonnet }
     fusion:
+      backend: openrouter
       max_panel_members: 5
       timeout_seconds: 180
-      allow_paid_panel: false
+      allow_paid_panel: true
       judge: { provider: openrouter, credential: primary, model: openrouter/free }
-      on_partial_failure: judge_with_partial
       require_human_review: true
 
 identities:

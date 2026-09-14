@@ -207,7 +207,7 @@ def _fusion_raw(**alias_overrides) -> dict:
     alias = {
         "mode": "fusion",
         "candidates": [
-            {"provider": "google", "credential": "free-1", "model": "gemini-flash"},
+            {"provider": "openrouter", "credential": "primary", "model": "openrouter/free"},
             {"provider": "openrouter", "credential": "primary", "model": "openrouter/free"},
         ],
         "fusion": {
@@ -224,6 +224,34 @@ def test_fusion_alias_valid():
     config = CerberusConfig.model_validate(_fusion_raw())
     fusion = config.aliases["cerberus/fusion-code"].fusion
     assert fusion is not None and fusion.allow_paid_panel is False
+    assert fusion.backend == "openrouter"  # the default managed backend
+
+
+def test_fusion_panel_must_share_the_judges_provider_and_credential():
+    """A managed backend runs the panel in ONE upstream call under ONE key, so a
+    seat on another provider (or credential) can never be honored — reject it."""
+    raw = _fusion_raw()
+    raw["aliases"]["cerberus/fusion-code"]["candidates"][0] = {
+        "provider": "google", "credential": "free-1", "model": "gemini-flash"
+    }
+    with pytest.raises(ValidationError, match="judge's provider/credential"):
+        CerberusConfig.model_validate(raw)
+
+
+def test_fusion_rejects_unknown_backend_and_removed_worker_fields():
+    raw = _fusion_raw()
+    raw["aliases"]["cerberus/fusion-code"]["fusion"]["backend"] = "bundled-worker"
+    with pytest.raises(ValidationError, match="backend"):
+        CerberusConfig.model_validate(raw)
+    # the bundled-worker binding and per-seat role prompts are gone; a stale
+    # config must fail loudly rather than be silently accepted without effect
+    for stale in ({"fusion_worker": {"endpoint": "http://w:1", "bearer_token_env": "T"}},):
+        with pytest.raises(ValidationError, match="fusion_worker"):
+            CerberusConfig.model_validate({**_fusion_raw(), **stale})
+    raw = _fusion_raw()
+    raw["aliases"]["cerberus/fusion-code"]["candidates"][0]["role"] = "Skeptic."
+    with pytest.raises(ValidationError, match="role"):
+        CerberusConfig.model_validate(raw)
 
 
 def test_fusion_policy_on_non_fusion_alias_rejected():

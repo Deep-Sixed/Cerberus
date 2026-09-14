@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 CostTier = Literal["free", "paid"]
 AliasMode = Literal["direct", "dispatch", "free", "fusion"]
+# Managed deliberation backends Cerberus can hand a fusion request to.
+FusionBackendName = Literal["openrouter"]
 
 ALIAS_PREFIX = "cerberus/"
 VERSION_PATTERN = r"^cerberus-\d{4}-\d{2}-\d{2}\.\d+$"
@@ -59,26 +61,6 @@ class TelemetryConfig(BaseModel):
     def validate_sink(self) -> "TelemetryConfig":
         if (self.endpoint is None) != (self.bearer_token_file is None):
             raise ValueError("telemetry endpoint and bearer_token_file must be configured together")
-        return self
-
-
-class FusionWorkerConfig(BaseModel):
-    """Bundled fusion worker binding — fixed at boot, like the telemetry sink.
-
-    The worker executes panel+judge; Cerberus holds the policy and fans out to it.
-    Absent this block, fusion-mode aliases have nowhere to run and fail closed.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    endpoint: HttpUrl | None = None
-    bearer_token_env: str | None = None
-    connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
-
-    @model_validator(mode="after")
-    def validate_worker(self) -> "FusionWorkerConfig":
-        if (self.endpoint is None) != (self.bearer_token_env is None):
-            raise ValueError("fusion_worker endpoint and bearer_token_env must be configured together")
         return self
 
 
@@ -182,9 +164,6 @@ class Candidate(BaseModel):
     credential: str = Field(min_length=1)
     model: str = Field(min_length=1)
     cost_tier: CostTier | None = None  # optional restatement; verified against the registry
-    # fusion panels only: a per-seat system prompt (the member's assigned stance).
-    # Ignored outside a fusion alias's candidate/judge list.
-    role: str | None = Field(default=None, min_length=1)
     # Optional per-candidate reasoning budget, injected into the upstream body.
     # Absent means "send nothing": the provider's own default applies and
     # behaviour is identical to before this field existed.
@@ -224,13 +203,22 @@ class Candidate(BaseModel):
 
 
 class FusionPolicy(BaseModel):
+    """Policy for a fusion-mode alias.
+
+    Cerberus decides WHETHER a request is a fusion request and WHICH models sit on
+    the panel; a managed backend performs the deliberation. ``judge`` names the
+    analyst model that compares the panel's answers (OpenRouter Fusion calls this
+    the analysis ``model``); the key is kept for configuration stability.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
+    backend: FusionBackendName = "openrouter"
+    # OpenRouter Fusion accepts 1-8 analysis models; the schema cap matches.
     max_panel_members: int = Field(ge=1, le=8)
     timeout_seconds: float = Field(gt=0, le=600)
     allow_paid_panel: bool = False
     judge: Candidate
-    on_partial_failure: Literal["judge_with_partial", "fail"] = "judge_with_partial"
     require_human_review: bool = False
 
 
@@ -285,7 +273,6 @@ class CerberusConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     state: StateConfig = Field(default_factory=StateConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
-    fusion_worker: FusionWorkerConfig = Field(default_factory=FusionWorkerConfig)
     providers: dict[str, ProviderEntry] = Field(min_length=1)
     aliases: dict[str, Alias] = Field(min_length=1)
     identities: dict[str, Identity] = Field(default_factory=dict)
@@ -339,6 +326,17 @@ class CerberusConfig(BaseModel):
                         f"max_panel_members={alias.fusion.max_panel_members}"
                     )
                 judge_model = self._validate_candidate(alias_name, alias, alias.fusion.judge, role="judge")
+                # A managed backend runs the whole panel under ONE provider call and
+                # credential, so every seat must be reachable through the judge's.
+                judge = alias.fusion.judge
+                for candidate in alias.candidates:
+                    if (candidate.provider, candidate.credential) != (judge.provider, judge.credential):
+                        raise ValueError(
+                            f"alias {alias_name!r}: fusion backend {alias.fusion.backend!r} requires every "
+                            f"panel candidate to use the judge's provider/credential "
+                            f"({judge.provider}/{judge.credential}); "
+                            f"{candidate.provider}/{candidate.model} uses {candidate.credential!r}"
+                        )
                 if not alias.fusion.allow_paid_panel and (
                     any(tier == "paid" for tier in tiers) or judge_model.cost_tier == "paid"
                 ):

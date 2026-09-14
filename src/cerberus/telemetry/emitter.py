@@ -17,7 +17,7 @@ from ..registry.schema import TelemetryConfig
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 AttemptOutcome = Literal[
     "missing_credentials",
     "transport_error",
@@ -33,7 +33,7 @@ RoutingOutcome = Literal[
     "stream_interrupted",
     "unauthorized",
     "shadow",
-    "fusion_unavailable",  # bundled worker unreachable — fusion aliases fail closed
+    "fusion_unavailable",  # fusion backend unreachable/unconfigured — fusion aliases fail closed
 ]
 
 
@@ -76,6 +76,10 @@ class RoutingEvent:
     # quality evidence is attributable to the setting actually used. None
     # when the route injects nothing (the provider default applied).
     reasoning_effort: str | None = None
+    # Fusion-mode only: what Cerberus asked the deliberation backend for and what
+    # it vouched for in return (backend name, requested panel/analyst, returned
+    # model, backend generation id, router metadata). None outside fusion mode.
+    fusion: dict[str, Any] | None = None
     schema_version: int = SCHEMA_VERSION
 
     def as_payload(self) -> dict[str, Any]:
@@ -84,6 +88,7 @@ class RoutingEvent:
             "request_id": self.request_id,
             "alias": self.alias,
             "reasoning_effort": self.reasoning_effort,
+            "fusion": self.fusion,
             "identity": self.identity,
             "config_version": self.config_version,
             "provider": self.provider,

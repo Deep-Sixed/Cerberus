@@ -16,6 +16,3 @@ secrets/
 *.pem
 *.key
 *.kdbx
-worker.generated.yaml
-
-node_modules/

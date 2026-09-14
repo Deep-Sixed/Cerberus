@@ -2,7 +2,8 @@
 
 Cerberus is a policy gateway with an OpenAI-compatible chat-completions API,
 identity-based routing, free-only selection, configuration management, an admin
-console, and Fusion panel-and-judge integration.
+console, and a Fusion mode that delegates multi-model deliberation to a managed
+external backend under Cerberus policy.
 
 Lineage: **MetaRouter v3 → MetaRouter v4 / Cerberus**. The public product version
 is **0.01**. MetaRouter v4 describes ancestry, not the release number. Python
@@ -35,26 +36,48 @@ This example serves on loopback port 4111. Replace the model identifier and
 credential for your upstream. The example placeholder is only for servers that
 have authentication disabled; it is not a production credential.
 
-## Container and Fusion
+## Container
 
-`Containerfile` builds the gateway. `deploy/fusion/compose.yaml` describes the
-API/worker boundary. To prepare the bundle:
+`Containerfile` builds the gateway; it is the only application service.
+`deploy/fusion/compose.yaml` runs it with the fusion-enabled dev config:
 
 ```sh
 cp .env.example .env  # populate locally with your credentials and cb- caller keys
-uv run --frozen cerberus fusion-config --config config/fusion-dev.yaml --out worker.generated.yaml
 docker compose --env-file .env -f deploy/fusion/compose.yaml config --quiet
 docker compose --env-file .env -f deploy/fusion/compose.yaml up --build -d
 ```
 
 Port 4000 is a loopback-only example binding; choose an unused port if needed.
-See [Fusion provenance](docs/fusion-provenance.md) for the
-worker's pinned source and reproducible build. Provider model names
-in example configurations are illustrative; check availability and cost with
-your provider before sending requests.
+Provider model names in example configurations are illustrative; check
+availability and cost with your provider before sending requests.
 
-The API is the client entry point. The worker receives authenticated gateway
-work and must remain on a dedicated network without a published host port.
+## Fusion
+
+Fusion is an external integration, not vendored code. Cerberus owns the policy —
+which identities may call a fusion alias, which models form the panel, which
+model acts as the analyst (`fusion.judge`), the cost tier, and the deadline —
+and hands the deliberation itself to a managed backend selected by
+`fusion.backend`. The initial backend is
+[OpenRouter's Fusion Router](https://openrouter.ai/docs/guides/features/plugins/fusion):
+each fusion request becomes one `openrouter/fusion` chat-completions call whose
+`fusion` plugin names the panel (`analysis_models`) and analyst (`model`), with
+`tool_choice: required` so the deliberation always runs. Cerberus reports the
+one call it made — request id, alias, panel, analyst, returned model, OpenRouter
+generation id, usage, latency — and never fabricates per-seat detail the
+backend does not expose.
+
+Requirements and caveats:
+
+- An OpenRouter API key is required for that backend; every panel candidate and
+  the judge must use the same provider credential.
+- A fusion request incurs multiple model calls and is billed as their sum.
+- OpenRouter Fusion is an evolving external API; its behavior and limits are
+  OpenRouter's, not Cerberus's.
+- Backend failures fail closed for fusion aliases only; dispatch and free
+  aliases keep working.
+- Per-seat persona prompts from the earlier bundled worker are not available;
+  the panel answers the caller's prompt directly.
+
 See [architecture](docs/architecture.md), [persistence](docs/persistence.md),
 and [security](SECURITY.md).
 

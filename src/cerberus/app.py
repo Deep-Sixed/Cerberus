@@ -37,7 +37,7 @@ from cerberus.identity import (
     resolve_identity,
     supplied_credential,
 )
-from cerberus.fusion import FusionWorkerClient, fusion_aliases, fusion_dispatch
+from cerberus.fusion import FusionBackend, OpenRouterFusionBackend, fusion_dispatch, fusion_status
 from cerberus.identity.session_store import InMemorySessionStore, SqliteSessionStore
 from cerberus.identity.sso import AdminSSO
 from cerberus.registry import CerberusConfig, ConfigDocument, load_config_document
@@ -166,7 +166,9 @@ def create_app(
     verifier = (
         AuthentikVerifier(boot_config.authentik, jwks_transport) if boot_config.authentik is not None else None
     )
-    fusion_worker = FusionWorkerClient(boot_config.fusion_worker, fusion_transport)
+    # Managed deliberation backends, keyed by FusionPolicy.backend. Fixed at boot
+    # like the telemetry sink; an alias whose backend is absent fails closed.
+    fusion_backends: dict[str, FusionBackend] = {"openrouter": OpenRouterFusionBackend(fusion_transport)}
     if boot_config.admin_sso is not None:
         # sessions + pending logins share the state DB when one is configured, so
         # they survive restarts and are consistent across workers; else in-memory
@@ -184,7 +186,8 @@ def create_app(
         finally:
             await telemetry.close()
             await app.state.http_client.aclose()
-            await fusion_worker.aclose()
+            for backend in fusion_backends.values():
+                await backend.aclose()
             if verifier is not None:
                 await verifier.aclose()
             if admin_sso is not None:
@@ -410,13 +413,10 @@ def create_app(
         return {
             **lifecycle.status(),
             "release_id": telemetry.release_id,
-            # SPEC §8: worker status on the dashboard. "configured" means the
-            # binding is present (a fusion request will reach the worker); we do
-            # not probe worker health from this read-only endpoint.
-            "fusion": {
-                "state": "configured" if fusion_worker.configured else "not_configured",
-                "aliases": fusion_aliases(boot_config),
-            },
+            # SPEC §8: fusion status on the dashboard. "configured" means every
+            # fusion alias's backend credential is present; this read-only
+            # endpoint never probes the backend.
+            "fusion": fusion_status(boot_config),
         }
 
     @app.get("/admin/config/active", response_model=None)
@@ -736,15 +736,15 @@ def create_app(
             if shadow_event is not None:
                 telemetry.emit(shadow_event)
         if alias.mode == "fusion":
-            # fusion-mode aliases fan out to the bundled worker; a worker outage
-            # fails only fusion aliases, never dispatch/free (fail closed).
+            # fusion-mode aliases hand deliberation to a managed backend; a
+            # backend outage fails only fusion aliases, never dispatch/free.
             return await fusion_dispatch(
                 body=body,
                 alias_name=alias_name,
                 alias=alias,
                 identity_name=context.name if context else None,
                 document=document,
-                worker=fusion_worker,
+                backends=fusion_backends,
                 telemetry=telemetry,
             )
         return await dispatch(

@@ -94,7 +94,7 @@ async def test_non_streaming_event_is_redacted_and_includes_usage(monkeypatch, t
     assert len(events) == 1
     assert events[0].headers["authorization"] == "Bearer telemetry-test-value"
     event = json.loads(events[0].content)
-    assert event["schema_version"] == 3
+    assert event["schema_version"] == 4
     assert event["alias"] == "cerberus/controlled"
     assert event["attempts"][0]["used_fallback"] is False
     assert event["attempts"][0]["cooldown_scope"] is None

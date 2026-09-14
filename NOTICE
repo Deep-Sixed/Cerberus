@@ -4,5 +4,7 @@ MetaRouter v3 used free-claude-code as an architectural reference:
 The donor notice states that its initial implementation copied no source files.
 Cerberus copyright and MIT license are in LICENSE.
 
-The optional Fusion worker is a modified managed Fusion (MIT) component.
-See docs/fusion-provenance.md and third_party/fusion_backend/LICENSE.
+Fusion mode delegates deliberation to OpenRouter's Fusion Router, an external
+API integration. Cerberus redistributes no OpenRouter source or assets.
+Releases before 0.01 bundled a modified managed Fusion (MIT) worker; that component
+and its provenance material are no longer part of this repository.

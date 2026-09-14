@@ -137,7 +137,7 @@ function computeAttention() {
     tile("Providers cooled down", cooled, cooled ? "throttled, next candidate takes over" : "all providers live", cooled ? "warn" : "good"),
     tile("Unconfigured providers", unconfigured, unconfigured ? "missing an api key" : "every provider has a key", unconfigured ? "danger" : "good"),
     tile("Failed routing", failed, `of ${events.length} recent events`, failed ? "warn" : "good"),
-    tile("Fusion worker", fusionReady ? "Ready" : "Off", `${((status.fusion && status.fusion.aliases) || []).length} alias(es)`, fusionReady ? "good" : "info"),
+    tile("Fusion backend", fusionReady ? "Ready" : "Off", `${((status.fusion && status.fusion.aliases) || []).length} alias(es)`, fusionReady ? "good" : "info"),
   ];
 }
 

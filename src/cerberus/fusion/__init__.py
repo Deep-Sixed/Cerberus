@@ -1,23 +1,27 @@
-"""Fusion-mode policy and worker client.
+"""Fusion mode: Cerberus policy in front of a managed deliberation backend.
 
-Panel/judge EXECUTION lives in cerberus-fusion-worker (the fusion_backend fork),
-never here (S10-S11). This package holds the config generator (Cerberus fusion
-alias → worker runtime config) and the worker client Cerberus fans out through.
+Cerberus decides whether a request is a fusion request, which panel and analyst
+run, and under which credential and deadline. A ``FusionBackend`` performs the
+deliberation; ``OpenRouterFusionBackend`` is the initial managed implementation.
+No panel/judge execution lives in this package.
 """
 
-from cerberus.fusion.client import FusionWorkerClient, fusion_dispatch
-from cerberus.fusion.generator import (
-    DEFAULT_WORKER_TOKEN_ENV,
-    fusion_aliases,
-    generate_worker_config,
-    generate_worker_config_yaml,
+from cerberus.fusion.backend import (
+    FusionBackend,
+    FusionError,
+    FusionRequest,
+    FusionResult,
+    OpenRouterFusionBackend,
 )
+from cerberus.fusion.dispatch import fusion_aliases, fusion_dispatch, fusion_status
 
 __all__ = [
-    "DEFAULT_WORKER_TOKEN_ENV",
-    "FusionWorkerClient",
+    "FusionBackend",
+    "FusionError",
+    "FusionRequest",
+    "FusionResult",
+    "OpenRouterFusionBackend",
     "fusion_aliases",
     "fusion_dispatch",
-    "generate_worker_config",
-    "generate_worker_config_yaml",
+    "fusion_status",
 ]

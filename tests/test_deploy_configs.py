@@ -48,9 +48,12 @@ def test_local_profile_is_valid_cerberus_schema():
 
 
 def test_fusion_dev_config_is_valid():
-    """The fusion bundle config validates and carries the worker binding + guard identity."""
+    """The fusion config validates, names the managed backend, and keeps the whole
+    panel on the judge's provider/credential (one upstream call, one key)."""
     doc = load_config_document(CONFIG_DIR / "fusion-dev.yaml", validate_credentials=False)
-    assert doc.config.fusion_worker.endpoint is not None
-    # the worker's own identity excludes fusion (recursion guard)
-    worker_identity = doc.config.identities["fusion-worker"]
-    assert "fusion" not in worker_identity.allowed_modes
+    alias = doc.config.aliases["cerberus/fusion-dev"]
+    assert alias.fusion is not None and alias.fusion.backend == "openrouter"
+    judge = alias.fusion.judge
+    assert {(c.provider, c.credential) for c in alias.candidates} == {(judge.provider, judge.credential)}
+    # no second service identity: the backend is external, not a worker with a key
+    assert "fusion-worker" not in doc.config.identities

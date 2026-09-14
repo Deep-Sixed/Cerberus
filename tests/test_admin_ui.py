@@ -287,7 +287,7 @@ async def test_admin_status_reports_release_and_fusion_distinct_from_checksum(mo
 
     assert status["release_id"], "release_id must be exposed and nonempty"
     assert status["release_id"] != health["config_checksum"], "release is not the config checksum"
-    # no fusion_worker binding in this config → truthful not_configured, aliases listed
+    # no fusion alias in this config → truthful not_configured, aliases listed
     assert status["fusion"]["state"] == "not_configured", "fusion state must be truthful, never omitted"
     assert status["fusion"]["aliases"] == []
     # the dashboard renders both as their own labeled values

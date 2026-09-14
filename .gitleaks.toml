@@ -2,7 +2,7 @@
 useDefault = true
 
 [[allowlists]]
-description = "Verified source-file SHA256 values; exact manifest entries only"
+description = "SHA256 entries of the removed third_party/fusion_backend-source.json manifest; retained history only, no such file in the tree"
 condition = "AND"
 paths = ['''(^|/)third_party/fusion_backend-source\.json$''']
 regexTarget = "line"
