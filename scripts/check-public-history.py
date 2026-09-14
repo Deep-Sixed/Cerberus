@@ -16,6 +16,10 @@ PRIVATE_PATHS = {
 }
 # These literals are split so the scanner does not match its own source.
 PATTERNS = {
+    "operator-vault": re.compile(rb"jarvis-" + rb"secret", re.I),
+    "operator-client": re.compile(rb"(?:CB_KEY_|cb-)" + rb"fri" + rb"day", re.I),
+    "private-bridge": re.compile(rb"host\.docker\." + rb"internal"),
+    "operator-deployment": re.compile(rb"EVECOR/" + rb"gateway/cerberus"),
     "operator-home": re.compile(rb"/home/" + rb"jarvis/"),
     "operator-storage": re.compile(rb"/mnt/" + rb"jarvis-data/"),
     "private-ip": re.compile(rb"\b(?:10\.(?:\d{1,3}\.){2}\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b"),
@@ -29,7 +33,7 @@ def git(*args):
 def main():
     seen = set()
     findings = 0
-    commits = git("rev-list", "HEAD").decode().splitlines()
+    commits = git("rev-list", "--all", "HEAD").decode().splitlines()
     for commit in commits:
         message = git("show", "-s", "--format=%B", commit)
         for rule, pattern in PATTERNS.items():

@@ -49,7 +49,7 @@ docker compose --env-file .env -f deploy/fusion/compose.yaml up --build -d
 
 Port 4000 is a loopback-only example binding; choose an unused port if needed.
 See [Fusion provenance](docs/fusion-provenance.md) for the
-worker's pinned source and outstanding build constraints. Provider model names
+worker's pinned source and reproducible build. Provider model names
 in example configurations are illustrative; check availability and cost with
 your provider before sending requests.
 
@@ -61,8 +61,8 @@ and [security](SECURITY.md).
 ## Release status
 
 This is a prepared 0.01 public-release candidate, not a production-readiness
-claim. Public release remains gated on a clean retained-history audit and the
-validation/provenance results. Host deployment records, production identities,
+claim. Publication requires operator review of the final sanitized-history and
+validation/provenance report. Host deployment records, production identities,
 secret files and incident runbooks belong outside this product repository.
 
 Cerberus is MIT licensed; see `LICENSE` and `NOTICE` for attribution.
