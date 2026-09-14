@@ -41,6 +41,5 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff]
-extend-exclude = ["third_party"]
 line-length = 120
 target-version = "py314"

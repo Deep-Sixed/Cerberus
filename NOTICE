@@ -6,5 +6,3 @@ Cerberus copyright and MIT license are in LICENSE.
 
 Fusion mode delegates deliberation to OpenRouter's Fusion Router, an external
 API integration. Cerberus redistributes no OpenRouter source or assets.
-Releases before 0.01 bundled a modified managed Fusion (MIT) worker; that component
-and its provenance material are no longer part of this repository.

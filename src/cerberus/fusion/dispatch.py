@@ -126,6 +126,7 @@ async def fusion_dispatch(
         body={k: v for k, v in body.items() if k != "stream"},
         panel_models=panel_models,
         analyst_model=judge.model,
+        outer_model=policy.outer_model.model,
         base_url=base_url,
         api_key=api_key,
         timeout_seconds=float(policy.timeout_seconds),
@@ -175,6 +176,7 @@ async def fusion_dispatch(
             "backend": policy.backend,
             "panel": candidates,
             "judge": f"{judge.provider}/{judge.model}",
+            "outer": f"{policy.outer_model.provider}/{policy.outer_model.model}",
             "config_version": document.version,
         },
     }

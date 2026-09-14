@@ -1,10 +1,11 @@
 """Fusion mode: Cerberus policy in front of OpenRouter's managed Fusion Router.
 
 OpenRouter is mocked at the HTTP boundary (fusion_transport); no live traffic.
-These prove the Cerberus side: a fusion alias becomes ONE ``openrouter/fusion``
-call whose panel/analyst come from Cerberus policy with the deliberation forced;
-authorization and alias policy still gate the route; every backend failure fails
-closed for fusion aliases only; the response and telemetry contracts hold.
+These prove the Cerberus side: a fusion alias becomes ONE OpenRouter chat call
+with the ``openrouter:fusion`` server tool; panel/analyst/outer model come from
+Cerberus policy with deliberation forced; authorization and alias policy still
+gate the route; every backend failure fails closed for fusion aliases only; the
+response and telemetry contracts hold.
 """
 
 import json
@@ -139,8 +140,13 @@ async def test_fusion_request_becomes_one_forced_openrouter_fusion_call(monkeypa
     assert str(req.url) == "https://openrouter.ai/api/v1/chat/completions"
     assert req.headers["authorization"] == "Bearer or-key"
     body = capture.body
-    assert body["model"] == "openrouter/fusion"
-    assert body["plugins"] == [{"id": "fusion", "analysis_models": ["free-a", "free-b"], "model": "free-a"}]
+    assert body["model"] == "free-a"
+    assert body["tools"] == [
+        {
+            "type": "openrouter:fusion",
+            "parameters": {"analysis_models": ["free-a", "free-b"], "model": "free-a"},
+        }
+    ]
     assert body["tool_choice"] == "required", "Cerberus policy chose fusion; the outer model may not skip it"
     assert body["messages"] == FUSION_REQ["messages"]
     assert "stream" not in body
@@ -156,6 +162,7 @@ async def test_fusion_request_becomes_one_forced_openrouter_fusion_call(monkeypa
         "backend": "openrouter",
         "panel": ["openrouter/free-a", "openrouter/free-b"],
         "judge": "openrouter/free-a",
+        "outer": "openrouter/free-a",
         "config_version": "cerberus-2026-09-14.1",
     }
 
@@ -178,7 +185,7 @@ async def test_fusion_telemetry_is_accurate_and_never_per_seat(monkeypatch, tmp_
         "analyst": "openrouter/free-a",
         "returned_model": "free-a",
         "generation_id": "gen-abc123",
-        "metadata": {"router": "openrouter/fusion", "provider": "SomeProvider"},
+        "metadata": {"provider": "SomeProvider"},
     }
     # OpenRouter exposes no per-seat outcomes, so Cerberus reports the ONE call it made
     assert [a["pool"] for a in event["attempts"]] == ["fusion"]
@@ -193,8 +200,9 @@ async def test_custom_panel_and_analyst_come_from_cerberus_policy(monkeypatch, t
     resp, events = await call(app)
 
     assert resp.status_code == 200
-    assert capture.body["plugins"][0]["analysis_models"] == ["free-c", "free-b", "free-a"]
-    assert capture.body["plugins"][0]["model"] == "free-c"
+    assert capture.body["tools"][0]["parameters"]["analysis_models"] == ["free-c", "free-b", "free-a"]
+    assert capture.body["tools"][0]["parameters"]["model"] == "free-c"
+    assert capture.body["model"] == "free-c"
     assert resp.json()["cerberus"]["judge"] == "openrouter/free-c"
     assert events[0]["fusion"]["analyst"] == "openrouter/free-c"
 
@@ -206,7 +214,7 @@ async def test_caller_cannot_override_panel_or_tool_surface(monkeypatch, tmp_pat
     # model/stream are Cerberus-owned and silently replaced ...
     resp, _ = await call(app, {**FUSION_REQ, "stream": True})
     assert resp.status_code == 200
-    assert capture.body["model"] == "openrouter/fusion" and "stream" not in capture.body
+    assert capture.body["model"] == "free-a" and "stream" not in capture.body
     # ... but tools/tool_choice/plugins cannot be honored through a fusion alias: reject, never forward
     for key, value in (("plugins", [{"id": "fusion", "analysis_models": ["free-c"]}]), ("tool_choice", "none"),
                        ("tools", [{"type": "function", "function": {"name": "x"}}])):
@@ -332,9 +340,10 @@ async def test_bad_openrouter_responses_fail_closed(monkeypatch, tmp_path, respo
 def test_openrouter_backend_builds_documented_fusion_body():
     request = FusionRequest(
         body={"messages": [{"role": "user", "content": "q"}], "temperature": 0.2, "model": "ignored",
-              "plugins": [{"id": "web"}], "tool_choice": "auto", "stream": True},
+              "tools": [{"type": "function", "function": {"name": "x"}}], "tool_choice": "auto", "stream": True},
         panel_models=["a", "b"],
         analyst_model="c",
+        outer_model="d",
         base_url="https://openrouter.ai/api/v1/",
         api_key="k",
         timeout_seconds=5,
@@ -343,8 +352,13 @@ def test_openrouter_backend_builds_documented_fusion_body():
     assert body == {
         "messages": [{"role": "user", "content": "q"}],
         "temperature": 0.2,
-        "model": "openrouter/fusion",
-        "plugins": [{"id": "fusion", "analysis_models": ["a", "b"], "model": "c"}],
+        "model": "d",
+        "tools": [
+            {
+                "type": "openrouter:fusion",
+                "parameters": {"analysis_models": ["a", "b"], "model": "c"},
+            }
+        ],
         "tool_choice": "required",
     }
 
@@ -357,11 +371,11 @@ async def test_openrouter_backend_normalizes_result_and_errors():
         return openrouter_ok(request)
 
     backend = OpenRouterFusionBackend(httpx.MockTransport(respond))
-    request = FusionRequest(body={"messages": []}, panel_models=["a"], analyst_model="c",
+    request = FusionRequest(body={"messages": []}, panel_models=["a"], analyst_model="c", outer_model="d",
                             base_url="https://openrouter.ai/api/v1", api_key="k", timeout_seconds=5)
     result = await backend.execute(request)
     assert (result.returned_model, result.generation_id, result.http_status) == ("free-a", "gen-abc123", 200)
-    assert result.metadata == {"router": "openrouter/fusion", "provider": "SomeProvider"}
+    assert result.metadata == {"provider": "SomeProvider"}
     await backend.aclose()
 
     def down(request: httpx.Request) -> httpx.Response:

@@ -1,14 +1,2 @@
 [extend]
 useDefault = true
-
-[[allowlists]]
-description = "SHA256 entries of the removed third_party/fusion_backend-source.json manifest; retained history only, no such file in the tree"
-condition = "AND"
-paths = ['''(^|/)third_party/fusion_backend-source\.json$''']
-regexTarget = "line"
-regexes = [
-  '''^\s*"fusion_backend/credentials\.py": "f803d2930cceecddd41bb93789e27c7b0f14a03ac16385691289f76de5241713",?$''',
-  '''^\s*"tests/test_credentials\.py": "7fafa285a13e912a1511babf04cef101d4cc91ff628c7cb4636b5efb0099f84d",?$''',
-  '''^\s*"web/src/lib/api\.ts": "2d052a9636635cc7965bac314c8d1d3281decab5b15ad1931f9e1b7d23ea16ac",?$''',
-  '''^\s*"web/src/lib/__tests__/api\.test\.ts": "f48f50a24fa112813107a000ecaa762b8804cdc6a5c358573cd39270e2ebfafa",?$''',
-]

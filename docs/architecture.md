@@ -4,7 +4,7 @@
 client → cerberus-api → identity + alias authorization + cost policy
                      → Dispatch / Free Router → provider → response
                      → Fusion backend → OpenRouter /chat/completions
-                                      → openrouter/fusion → panel models
+                                      → openrouter:fusion server tool → panel models
                                       → analyst → final response
 ```
 

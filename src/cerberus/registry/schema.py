@@ -205,10 +205,14 @@ class Candidate(BaseModel):
 class FusionPolicy(BaseModel):
     """Policy for a fusion-mode alias.
 
-    Cerberus decides WHETHER a request is a fusion request and WHICH models sit on
-    the panel; a managed backend performs the deliberation. ``judge`` names the
-    analyst model that compares the panel's answers (OpenRouter Fusion calls this
-    the analysis ``model``); the key is kept for configuration stability.
+    Cerberus decides WHETHER a request is a fusion request and WHICH models take
+    part; a managed backend performs the deliberation. Three participants exist
+    and every one is a registry-validated candidate under this policy's cost
+    rule: the panel (``candidates``), the analyst that compares the panel's
+    answers (``judge``; OpenRouter Fusion calls this the analysis ``model``), and
+    the outer model that receives the analysis and writes the final answer
+    (``outer``, defaulting to the judge). Leaving the outer model to the backend
+    would let an unregistered, possibly paid model take part.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -216,10 +220,16 @@ class FusionPolicy(BaseModel):
     backend: FusionBackendName = "openrouter"
     # OpenRouter Fusion accepts 1-8 analysis models; the schema cap matches.
     max_panel_members: int = Field(ge=1, le=8)
+    # Absolute deadline for the whole deliberation, enforced by Cerberus.
     timeout_seconds: float = Field(gt=0, le=600)
     allow_paid_panel: bool = False
     judge: Candidate
+    outer: Candidate | None = None
     require_human_review: bool = False
+
+    @property
+    def outer_model(self) -> Candidate:
+        return self.outer if self.outer is not None else self.judge
 
 
 class Alias(BaseModel):
@@ -326,22 +336,26 @@ class CerberusConfig(BaseModel):
                         f"max_panel_members={alias.fusion.max_panel_members}"
                     )
                 judge_model = self._validate_candidate(alias_name, alias, alias.fusion.judge, role="judge")
-                # A managed backend runs the whole panel under ONE provider call and
-                # credential, so every seat must be reachable through the judge's.
+                outer_model = self._validate_candidate(alias_name, alias, alias.fusion.outer_model, role="outer")
+                # A managed backend runs the whole deliberation as ONE provider call
+                # under ONE credential, so every participant must be reachable
+                # through the judge's.
                 judge = alias.fusion.judge
-                for candidate in alias.candidates:
+                for label, candidate in [("panel", c) for c in alias.candidates] + [("outer", alias.fusion.outer_model)]:
                     if (candidate.provider, candidate.credential) != (judge.provider, judge.credential):
                         raise ValueError(
                             f"alias {alias_name!r}: fusion backend {alias.fusion.backend!r} requires every "
-                            f"panel candidate to use the judge's provider/credential "
+                            f"{label} candidate to use the judge's provider/credential "
                             f"({judge.provider}/{judge.credential}); "
                             f"{candidate.provider}/{candidate.model} uses {candidate.credential!r}"
                         )
                 if not alias.fusion.allow_paid_panel and (
-                    any(tier == "paid" for tier in tiers) or judge_model.cost_tier == "paid"
+                    any(tier == "paid" for tier in tiers)
+                    or judge_model.cost_tier == "paid"
+                    or outer_model.cost_tier == "paid"
                 ):
                     raise ValueError(
-                        f"alias {alias_name!r}: paid panel member or judge requires allow_paid_panel"
+                        f"alias {alias_name!r}: paid panel member, judge or outer model requires allow_paid_panel"
                     )
 
         for identity_name, identity in self.identities.items():
