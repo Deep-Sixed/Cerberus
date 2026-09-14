@@ -23,6 +23,9 @@ PATTERNS = {
     "operator-home": re.compile(rb"/home/" + rb"jarvis/"),
     "operator-storage": re.compile(rb"/mnt/" + rb"jarvis-data/"),
     "private-ip": re.compile(rb"\b(?:10\.(?:\d{1,3}\.){2}\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b"),
+    # the publishing identity is Deep-Sixed; the maintainer's personal name,
+    # account and address must not appear in any published blob or message
+    "personal-identity": re.compile(rb"charles" + rb"\s*\.?\s*snyder" + rb"|charles" + rb"snyder", re.I),
 }
 
 
