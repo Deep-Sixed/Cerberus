@@ -250,6 +250,8 @@ def create_app(
         return {
             "status": "ok",
             "service": "cerberus",
+            "routing": {"status": "healthy"},
+            "telemetry": telemetry.health_snapshot(),
             "config_version": active.version,
             "config_checksum": active.checksum,
             "cooldowns": store.snapshot(),

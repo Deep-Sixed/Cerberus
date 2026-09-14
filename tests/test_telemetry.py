@@ -7,6 +7,7 @@ schema overhaul.
 
 import asyncio
 import json
+import logging
 import time
 from datetime import datetime, timezone
 
@@ -256,6 +257,77 @@ async def test_telemetry_failure_does_not_fail_or_delay_inference(monkeypatch, t
 
     assert response.status_code == 200
     assert elapsed < 0.2
+
+
+@pytest.mark.asyncio
+async def test_http_auth_failure_degrades_telemetry_without_failing_liveness(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    config = telemetry_config(monkeypatch, tmp_path)
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    async def telemetry(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "Invalid authentication credentials"})
+
+    app = create_app(config, httpx.MockTransport(upstream), httpx.MockTransport(telemetry))
+    with caplog.at_level(logging.ERROR, logger="cerberus.telemetry.emitter"):
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                inference = await client.post(
+                    "/v1/chat/completions",
+                    json={"model": "cerberus/controlled", "messages": []},
+                )
+                for _ in range(20):
+                    health = await client.get("/health")
+                    if health.json()["telemetry"]["status"] == "degraded":
+                        break
+                    await asyncio.sleep(0)
+
+    assert inference.status_code == 200
+    assert health.status_code == 200
+    payload = health.json()
+    assert payload["status"] == "ok"
+    assert payload["routing"] == {"status": "healthy"}
+    assert payload["telemetry"]["last_error"] == "http_401"
+    assert payload["telemetry"]["last_status_code"] == 401
+    assert payload["telemetry"]["consecutive_failures"] == 1
+    assert "status_code=401" in caplog.text
+    assert "telemetry-test-value" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_transport_failure_is_distinct_and_success_clears_degradation(monkeypatch, tmp_path) -> None:
+    config = telemetry_config(monkeypatch, tmp_path)
+    responses = ["transport_error", "success"]
+
+    async def sink(request: httpx.Request) -> httpx.Response:
+        if responses.pop(0) == "transport_error":
+            raise httpx.ConnectError("controlled outage", request=request)
+        return httpx.Response(201)
+
+    emitter = TelemetryEmitter(config.telemetry, httpx.MockTransport(sink), release_id="test-release")
+    await emitter.start()
+    emitter.emit(_minimal_event())
+    while emitter.health_snapshot()["status"] == "pending":
+        await asyncio.sleep(0)
+
+    degraded = emitter.health_snapshot()
+    assert degraded["status"] == "degraded"
+    assert degraded["last_error"] == "transport_error"
+    assert degraded["last_status_code"] is None
+    assert degraded["consecutive_failures"] == 1
+
+    emitter.emit(_minimal_event(request_id="00000000-0000-4000-8000-000000000002"))
+    await emitter.close()
+
+    recovered = emitter.health_snapshot()
+    assert recovered["status"] == "healthy"
+    assert recovered["last_error"] is None
+    assert recovered["consecutive_failures"] == 0
+    assert recovered["last_success_at"] is not None
 
 
 @pytest.mark.asyncio
