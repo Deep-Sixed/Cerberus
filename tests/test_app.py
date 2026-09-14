@@ -278,3 +278,40 @@ async def test_direct_models_require_per_identity_optin(monkeypatch):
     assert "alpha/alpha-free" in {m["id"] for m in models2.json()["data"]}
     ok = await call(app2, "POST", "/v1/chat/completions", json={"model": "alpha/alpha-free", "messages": []}, headers=auth)
     assert ok.status_code == 200 and ok.json()["cerberus"]["provider"] == "alpha"
+
+
+@pytest.mark.parametrize("model_id", ["gpt-4o-mini", "operator/custom-model-2026"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_configured_models_route_without_a_catalog(monkeypatch, model_id, stream):
+    """Configured model IDs and provider payloads need no bundled model catalog."""
+    cfg = make_config(monkeypatch).model_dump(mode="json")
+    cfg["providers"]["alpha"]["models"] = {model_id: {"cost_tier": "free", "context_window": 8192}}
+    cfg["aliases"]["cerberus/main"]["candidates"][0]["model"] = model_id
+    seen = []
+    payload = {
+        "model": "cerberus/main",
+        "messages": [{"role": "user", "content": "test"}],
+        "stream": stream,
+        "temperature": 0.25,
+        "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
+    }
+    usage = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+
+    async def upstream(request):
+        seen.append(request)
+        assert request.url == "https://alpha.example/v1/chat/completions"
+        assert httpx.Response(200, content=request.content).json() == {**payload, "model": model_id}
+        if stream:
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=b"data: [DONE]\n\n")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}], "usage": usage})
+
+    app = create_app(CerberusConfig.model_validate(cfg), http_transport=httpx.MockTransport(upstream))
+    response = await call(app, "POST", "/v1/chat/completions", json=payload)
+    assert response.status_code == 200
+    assert len(seen) == 1  # No metadata discovery request before inference.
+    if stream:
+        assert response.text == "data: [DONE]\n\n"
+        assert response.headers["x-cerberus-model"] == model_id
+    else:
+        assert response.json()["usage"] == usage
+        assert response.json()["cerberus"]["model"] == model_id
