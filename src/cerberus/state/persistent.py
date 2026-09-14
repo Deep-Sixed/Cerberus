@@ -1,6 +1,6 @@
 """SQLite-backed cooldown store — same interface as the in-memory store, survives restart.
 
-Proportionate persistence (SPEC.md capability 5): one file, one table, absolute
+Single-host persistence (see docs/persistence.md): one file, one table, absolute
 wall-clock retry_at. Postgres is deliberately not required.
 """
 

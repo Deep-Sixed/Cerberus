@@ -1,0 +1,2 @@
+# Preserve byte-identical upstream generated assets; whitespace is inherited.
+third_party/fusion_backend/fusion_backend/static/** -whitespace

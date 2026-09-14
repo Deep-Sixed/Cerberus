@@ -26,6 +26,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
+from cerberus import __version__
 from cerberus.control import ConfigLifecycle
 from cerberus.control.admin_fields import apply_updates, build_schema, stage
 from cerberus.identity import (
@@ -194,7 +195,7 @@ def create_app(
     public_docs = boot_config.server.public_docs
     app = FastAPI(
         title="Cerberus",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
         docs_url="/docs" if public_docs else None,
         redoc_url="/redoc" if public_docs else None,

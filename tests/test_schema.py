@@ -1,4 +1,4 @@
-"""Session 1 acceptance tests — Cerberus config schema (SPEC.md capabilities 1-3, 6)."""
+"""Session 1 acceptance tests — Cerberus config schema (registry, aliases and identity validation)."""
 
 import pytest
 from pydantic import ValidationError

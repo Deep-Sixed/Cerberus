@@ -8,12 +8,12 @@ metadata:
 
 server:
   host: 127.0.0.1
-  port: 4102   # 4101 is live metarouter-v3; 4000 is the cutover port — dev stays clear of both
+  port: 4102   # native development listener
 
 state:
   path: var/cooldowns.sqlite3   # repo-relative, gitignored; survives restarts
 
-telemetry: {}                   # disabled for the first slices; ContextForge wiring is a later phase
+telemetry: {}                   # optional telemetry is disabled
 
 providers:
   openrouter:

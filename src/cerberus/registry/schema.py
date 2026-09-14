@@ -1,4 +1,4 @@
-"""Cerberus configuration schema — registry, aliases, identities (SPEC.md caps 1-3).
+"""Cerberus configuration schema — registry, aliases, identities (see docs/architecture.md).
 
 Self-contained and fail-closed: every cross-reference is resolved at validation
 time, cost tiers are registry-derived (restatements are checked, never trusted),

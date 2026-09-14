@@ -14,7 +14,7 @@ server:
 state:
   path: /var/lib/cerberus/cooldowns.sqlite3   # mount a writable volume here
 
-telemetry: {}                         # enable by pointing at ContextForge + bearer token file
+telemetry: {}                         # enable with your telemetry endpoint and bearer token file
 
 providers:
   openrouter:

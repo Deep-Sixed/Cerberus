@@ -39,6 +39,13 @@ def test_free_alias_cannot_be_widened_to_a_paid_candidate(name):
         CerberusConfig.model_validate(raw)
 
 
+def test_local_profile_is_valid_cerberus_schema():
+    """The local example uses the current schema and a loopback-only upstream."""
+    doc = load_config_document(CONFIG_DIR / "local.example.yaml", validate_credentials=False)
+    assert doc.config.aliases["cerberus/local"].mode == "dispatch"
+    assert str(doc.config.providers["local"].base_url) == "http://127.0.0.1:8080/v1"
+    assert doc.config.telemetry.endpoint is None
+
 
 def test_fusion_dev_config_is_valid():
     """The fusion bundle config validates and carries the worker binding + guard identity."""

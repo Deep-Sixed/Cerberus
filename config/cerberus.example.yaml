@@ -1,4 +1,4 @@
-# Cerberus example configuration — schema reference for Session 1 (SPEC.md caps 1-3, 6).
+# Cerberus example configuration — portable schema reference.
 # Secrets are env-var NAMES populated by the file-secrets bridge; never values.
 metadata:
   version: cerberus-2026-07-16.1
@@ -38,7 +38,7 @@ aliases:
       - { provider: google, credential: free-1, model: gemini-flash }
       - { provider: openrouter, credential: primary, model: openrouter/free }
 
-  cerberus/dispatch-ledger:
+  cerberus/dispatch-standard:
     mode: dispatch
     allow_paid_fallback: true
     candidates:
@@ -59,8 +59,8 @@ aliases:
       require_human_review: true
 
 identities:
-  recon:
-    credential_env: CB_KEY_RECON    # holds a cb- client key
+  example-reader:
+    credential_env: CB_KEY_EXAMPLE_READER    # holds a cb- client key
     allowed_modes: [free]           # deny-by-default: absence means denied
     allowed_aliases: [cerberus/free]
     default_alias: cerberus/free

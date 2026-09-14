@@ -1,8 +1,8 @@
-Cerberus v3 was designed with free-claude-code as a reference implementation.
-
-free-claude-code is MIT licensed:
+Cerberus evolved from MetaRouter v3 (the MetaRouter v4 lineage).
+MetaRouter v3 used free-claude-code as an architectural reference:
 (an open-source Claude Code proxy project; architectural reference only)
+The donor notice states that its initial implementation copied no source files.
+Cerberus copyright and MIT license are in LICENSE.
 
-This initial v3 implementation contains no copied source files. Future direct
-ports must preserve the upstream MIT copyright and license notice.
-
+The optional Fusion worker is a modified managed Fusion (MIT) component.
+See docs/fusion-provenance.md and third_party/fusion_backend/LICENSE.

@@ -1,9 +1,9 @@
 [project]
 name = "cerberus"
-version = "0.1.0"
+version = "0.01"
 description = "Cerberus - unified policy routing service (Dispatch, Free Router, Fusion)"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = "==3.14.5"
 license = { file = "LICENSE" }
 authors = [{ name = "Deep-Sixed" }]
 dependencies = [
@@ -28,10 +28,12 @@ artifacts = ["src/cerberus/ui/static/*"]
 cerberus = "cerberus.cli:main"
 
 [dependency-groups]
+build = ["hatchling>=1.27,<2"]
 dev = [
   "pytest>=9,<10",
   "pytest-asyncio>=1,<2",
   "ruff>=0.15,<1",
+  "hatchling>=1.27,<2",
 ]
 
 [tool.pytest.ini_options]
@@ -39,5 +41,6 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff]
+extend-exclude = ["third_party"]
 line-length = 120
-target-version = "py312"
+target-version = "py314"

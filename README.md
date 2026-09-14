@@ -1,52 +1,68 @@
-# Cerberus
+# Cerberus 0.01
 
-Unified policy routing service for the EVECOR gateway — **three heads, one body**.
+Cerberus is a policy gateway with an OpenAI-compatible chat-completions API,
+identity-based routing, free-only selection, configuration management, an admin
+console, and Fusion panel-and-judge integration.
 
-```text
-                         CERBERUS
-              ┌────────── Dispatch ──────────┐
-Clients ──────┼────────── Free Router ───────┼── Providers
-              └────────── Fusion ────────────┘
-                 Shared registry · identity · selection engine
-                 state · config lifecycle · telemetry · admin UI
-```
-
-Cerberus replaces MetaRouter v3: one OpenAI-compatible endpoint (port 4000 at
-cutover), one configuration tree, one identity system, one deterministic selection engine,
-one telemetry stream, one read-only admin dashboard, plus a bundled fusion worker
-(`cerberus-fusion-worker`) for multi-model deliberation.
-
-- **Dispatch** — deterministic identity-to-model assignment (ordered candidates per alias).
-- **Free Router** — free-only routing; no implicit free→paid fallback, ever.
-- **Fusion** — panel + judge deliberation; policy here, execution in the bundled worker.
-
-## Documents
-
-| File | Purpose |
-|---|---|
-| [SPEC.md](SPEC.md) | Frozen specification (2026-07-16) — the scope contract for every session |
-| [PLAN.md](PLAN.md) | 15-session build sequence, acceptance tests, review gates |
-
-## Status
-
-Phase 0 complete: donor code imported (MetaRouter v3, first commit), package restructured.
-The donor modules (`app.py`, `config.py`, `routing.py`, `cli.py`, `telemetry/emitter.py`)
-are v3 code renamed — they run and their tests pass, but Sessions 1–3 rewrite config,
-selection, and state onto the Cerberus schema. Subpackage `__init__.py` docstrings carry
-each module's charter.
+Lineage: **MetaRouter v3 → MetaRouter v4 / Cerberus**. The public product version
+is **0.01**. MetaRouter v4 describes ancestry, not the release number. Python
+packaging normalizes `0.01` to `0.1` in distribution metadata and filenames;
+release names and this product's version declaration remain `0.01`.
+See [Python version normalization](https://packaging.python.org/en/latest/specifications/version-specifiers/#integer-normalization).
 
 ## Development
 
-```bash
-uv sync                  # env — uses the available sandbox interpreter (Python 3.12+)
-./scripts/ci.sh          # ruff + pytest — must be green at end of every session
+Use Python **3.14.5** and uv **0.11.29**. The committed `uv.lock` pins dependency
+resolution; CI installs it without updating it.
+
+```sh
+uv sync --frozen --python 3.14.5
+./scripts/ci.sh
+uv build --no-build-isolation
 ```
 
-Development supports **Python 3.12 or newer** (`requires-python = ">=3.12"`); validate with
-whatever interpreter the sandbox provides. The Containerfile's `python:3.14.5-slim` base is the
-**production-image lane only** — it is not the minimum development interpreter and must not block
-development acceptance. Final 3.14.x validation happens at production-readiness/promotion.
+The admin UI is plain HTML, CSS and JavaScript shipped in the wheel; there is no
+separate frontend compilation step. JavaScript syntax is checked with Node 26.3.1.
 
-Keep deployment configuration separate from product source (compose + config +
-file-secrets only — no source in the gateway tree). Secrets are references (environment /
-Docker file-secrets); no secret values in code, config, tests, or logs.
+For a local OpenAI-compatible upstream listening on port 8080:
+
+```sh
+export LOCAL_API_KEY=local-no-auth
+uv run --frozen cerberus serve --config config/local.example.yaml
+```
+
+This example serves on loopback port 4111. Replace the model identifier and
+credential for your upstream. The example placeholder is only for servers that
+have authentication disabled; it is not a production credential.
+
+## Container and Fusion
+
+`Containerfile` builds the gateway. `deploy/fusion/compose.yaml` describes the
+API/worker boundary. To prepare the bundle:
+
+```sh
+cp .env.example .env  # populate locally with your credentials and cb- caller keys
+uv run --frozen cerberus fusion-config --config config/fusion-dev.yaml --out worker.generated.yaml
+docker compose --env-file .env -f deploy/fusion/compose.yaml config --quiet
+docker compose --env-file .env -f deploy/fusion/compose.yaml up --build -d
+```
+
+Port 4000 is a loopback-only example binding; choose an unused port if needed.
+See [Fusion provenance](docs/fusion-provenance.md) for the
+worker's pinned source and outstanding build constraints. Provider model names
+in example configurations are illustrative; check availability and cost with
+your provider before sending requests.
+
+The API is the client entry point. The worker receives authenticated gateway
+work and must remain on a dedicated network without a published host port.
+See [architecture](docs/architecture.md), [persistence](docs/persistence.md),
+and [security](SECURITY.md).
+
+## Release status
+
+This is a prepared 0.01 public-release candidate, not a production-readiness
+claim. Public release remains gated on a clean retained-history audit and the
+validation/provenance results. Host deployment records, production identities,
+secret files and incident runbooks belong outside this product repository.
+
+Cerberus is MIT licensed; see `LICENSE` and `NOTICE` for attribution.

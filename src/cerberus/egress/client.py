@@ -2,7 +2,7 @@
 
 The streaming collector and usage parsing are transplanted verbatim from the
 donor (MetaRouter v3 app.py, commit 14cb770) — behavior-preserving by design;
-see the S2 review gate in PLAN.md.
+see docs/architecture.md for the gateway boundary.
 """
 
 from __future__ import annotations

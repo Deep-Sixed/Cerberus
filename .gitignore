@@ -4,5 +4,18 @@ __pycache__/
 .ruff_cache/
 *.py[cod]
 .env
+.env.*
+!.env.example
 var/
+dist/
+build/
+*.egg-info/
+secrets/
+*.sqlite*
+*.db
+*.pem
+*.key
+*.kdbx
+worker.generated.yaml
 
+node_modules/

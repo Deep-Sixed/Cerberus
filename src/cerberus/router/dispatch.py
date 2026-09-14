@@ -1,6 +1,6 @@
 """The failover loop — ordered candidates, scoped cooldowns, exclusion telemetry.
 
-One loop serves every alias mode (SPEC.md: the heads are policies, not routers).
+One loop serves every alias mode (the heads share one policy engine).
 Fusion-mode aliases divert to the worker in Session 11.
 """
 
