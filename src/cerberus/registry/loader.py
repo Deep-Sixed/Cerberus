@@ -37,6 +37,15 @@ def required_credential_envs(config: CerberusConfig) -> list[str]:
         names.add(config.server.api_token_env)
     if config.server.admin_token_env:
         names.add(config.server.admin_token_env)
+    if config.admin_sso is not None:
+        # An unset session_secret_env makes AdminSSO._secret() an empty HMAC key,
+        # so admin session cookies would be signed with a key that is not secret.
+        # The client id/secret are equally load-bearing: the console cannot
+        # complete an OIDC exchange without them. Fail closed at boot, as with
+        # every other credential reference, rather than at first admin login.
+        names.add(config.admin_sso.session_secret_env)
+        names.add(config.admin_sso.client_id_env)
+        names.add(config.admin_sso.client_secret_env)
     return sorted(names)
 
 
