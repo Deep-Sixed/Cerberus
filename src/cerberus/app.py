@@ -620,7 +620,12 @@ def create_app(
             )
         except httpx.HTTPError as exc:
             if control_plane is not None:
-                control_plane.set_provider_health(name, "down", detail=type(exc).__name__)
+                # A probe is a point-in-time sample, not a provider-wide verdict.
+                # One connect timeout or TLS hiccup must not remove an entire
+                # provider from routing — real per-request failures are already
+                # excluded at the right scope, and with their own expiry, by the
+                # cooldown store. Recorded as degraded, exactly like a 5xx.
+                control_plane.set_provider_health(name, "degraded", detail=type(exc).__name__)
             return JSONResponse(
                 content={"ok": False, "reason": type(exc).__name__}, headers=_ADMIN_UI_HEADERS
             )

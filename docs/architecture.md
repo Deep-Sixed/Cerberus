@@ -35,7 +35,12 @@ and checksum.
 
 Provider health and cooldowns are operational state. They may exclude a member
 of the pinned route universe at decision time, but they cannot add or rewrite a
-path. Normal label lookup reads the in-memory snapshot and performs no SQL.
+path. Every such exclusion is bounded: a cooldown carries its own `retry_at`, and
+a provider-wide `down` carries an expiry, so an exclusion can never outlive the
+observation that produced it. A health probe is a point-in-time sample, so it
+records `degraded` — never `down` — when the provider cannot be reached; real
+per-request failures are excluded at their own scope by the cooldown store.
+Normal label lookup reads the in-memory snapshot and performs no SQL.
 Routing and usage records are written asynchronously after a decision.
 
 The gateway's static admin console uses guarded admin endpoints. Optional OIDC
