@@ -692,8 +692,16 @@ def create_app(
         alias_name = body.get("model")
         if alias_name is None and context is not None and context.identity.default_alias:
             alias_name = context.identity.default_alias
-        # raw provider/model ids route as ad-hoc free requests when not a named alias
-        direct = resolve_direct_model(config, alias_name) if isinstance(alias_name, str) else None
+        # raw provider/model ids route as ad-hoc free requests when not a named alias.
+        # A configured alias always wins. Resolving direct first would let an alias
+        # whose name also parses as provider/model — possible whenever a provider is
+        # named "cerberus", since every alias carries the "cerberus/" prefix — take
+        # the direct path and skip authorization_error's allowed_aliases check.
+        direct = (
+            resolve_direct_model(config, alias_name)
+            if isinstance(alias_name, str) and alias_name not in config.aliases
+            else None
+        )
         if not isinstance(alias_name, str) or (alias_name not in config.aliases and direct is None):
             return JSONResponse(
                 status_code=404,

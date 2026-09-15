@@ -280,6 +280,59 @@ async def test_direct_models_require_per_identity_optin(monkeypatch):
     assert ok.status_code == 200 and ok.json()["cerberus"]["provider"] == "alpha"
 
 
+def _colliding_alias_config(monkeypatch):
+    """A provider named "cerberus" makes every alias name also parse as a direct
+    provider/model id, because aliases carry the "cerberus/" prefix."""
+
+    monkeypatch.setenv("CKEY", "ckey-secret")
+    monkeypatch.setenv("CB_KEY_SCOPED", "cb-scoped")
+    return CerberusConfig.model_validate({
+        "metadata": {"version": "cerberus-2026-07-16.1"},
+        "providers": {"cerberus": {"base_url": "https://up.example/v1",
+            "credentials": {"main": {"api_key_env": "CKEY"}},
+            "models": {"restricted": {"cost_tier": "free"}}}},
+        "identities": {"scoped": {"credential_env": "CB_KEY_SCOPED", "allowed_modes": ["free"],
+            "allowed_aliases": ["cerberus/allowed"], "allow_direct_models": True}},
+        "aliases": {
+            "cerberus/allowed": {"mode": "free",
+                "candidates": [{"provider": "cerberus", "credential": "main", "model": "restricted"}]},
+            # name also parses as provider "cerberus" + free model "restricted"
+            "cerberus/restricted": {"mode": "dispatch",
+                "candidates": [{"provider": "cerberus", "credential": "main", "model": "restricted"}]},
+        },
+    })
+
+
+@pytest.mark.asyncio
+async def test_named_alias_takes_precedence_over_direct_resolution(monkeypatch):
+    """A configured alias is never reachable through the direct provider/model path.
+
+    Resolving direct first let an identity invoke an alias absent from its
+    allowed_aliases: the direct branch only checks allow_direct_models and free
+    mode, so authorization_error() — and with it the allow-list — never ran.
+    """
+
+    seen: list[httpx.Request] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    app = create_app(_colliding_alias_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
+    auth = {"authorization": "Bearer cb-scoped"}
+
+    denied = await call(app, "POST", "/v1/chat/completions",
+                        json={"model": "cerberus/restricted", "messages": []}, headers=auth)
+    assert denied.status_code == 403
+    assert denied.json()["error"]["reason"] == "alias_not_allowed"
+    assert seen == []  # the alias must never reach its upstream
+
+    # the identity's own alias still routes, and direct ids are unaffected
+    allowed = await call(app, "POST", "/v1/chat/completions",
+                         json={"model": "cerberus/allowed", "messages": []}, headers=auth)
+    assert allowed.status_code == 200 and len(seen) == 1
+
+
 @pytest.mark.parametrize("model_id", ["gpt-4o-mini", "operator/custom-model-2026"])
 @pytest.mark.parametrize("stream", [False, True])
 async def test_configured_models_route_without_a_catalog(monkeypatch, model_id, stream):
