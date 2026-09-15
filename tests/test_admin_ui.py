@@ -295,6 +295,27 @@ async def test_admin_status_reports_release_and_fusion_distinct_from_checksum(mo
 
 
 @pytest.mark.asyncio
+async def test_dashboard_compares_fusion_against_states_the_api_emits(monkeypatch, tmp_path):
+    """Every fusion state literal in the page script must be one fusion_status()
+    can actually return. The top bar compared against "healthy", which the API
+    never emits, so the pill could never reach its configured state."""
+
+    app = make_app(monkeypatch, tmp_path)
+    async with app.router.lifespan_context(app):
+        async with client_for(app, LOOPBACK) as local:
+            script = (await local.get("/admin/ui/app.js")).text
+            live_state = (await local.get("/admin/status")).json()["fusion"]["state"]
+
+    # the state this deployment actually reports, plus the only two fusion_status()
+    # can return — a literal outside this set is unreachable by construction
+    emitted = {live_state, "configured", "not_configured"}
+
+    compared = set(re.findall(r'fusion(?:\.state)?\s*===\s*"([^"]+)"', script))
+    assert compared, "expected the script to compare the fusion state"
+    assert compared <= emitted, f"script compares fusion states the API never emits: {compared - emitted}"
+
+
+@pytest.mark.asyncio
 async def test_no_credential_is_embedded_in_dashboard_assets(monkeypatch, tmp_path):
     monkeypatch.setenv("CERBERUS_API_TOKEN", "admin-token-secret-value")
     app = make_app(monkeypatch, tmp_path, token="admin-token-secret-value")

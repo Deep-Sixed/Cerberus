@@ -102,7 +102,8 @@ function renderTop() {
   document.getElementById("top-status").replaceChildren(
     el("span", { class: "pill accent", text: "cfg " + text(health.config_version) }),
     el("span", { class: "pill", text: "release " + text(status.release_id) }),
-    el("span", { class: fusion === "healthy" ? "pill good" : "pill", text: "fusion: " + fusion })
+    // fusion_status() emits "configured" / "not_configured" — never "healthy"
+    el("span", { class: fusion === "configured" ? "pill good" : "pill", text: "fusion: " + fusion })
   );
   // the most recent routing event's own timestamp — not a client-side "now"
   const latest = (events || [])[0];
