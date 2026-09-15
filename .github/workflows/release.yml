@@ -1,0 +1,102 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: 3.14.5
+
+      - name: Verify release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$(
+            python - <<'PY'
+          import tomllib
+          with open("pyproject.toml", "rb") as f:
+              print(tomllib.load(f)["project"]["version"])
+          PY
+          )"
+
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match project version $VERSION" >&2
+            exit 1
+          fi
+
+          git fetch origin main
+          TAG_COMMIT="$(git rev-parse "${GITHUB_REF_NAME}^{commit}")"
+
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "Release tag does not point to a commit reachable from main" >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 26.3.1
+
+      - name: Install uv
+        run: python -m pip install uv==0.11.29
+
+      - name: Sync dependencies
+        run: uv sync --frozen --python 3.14.5
+
+      - name: Run test suite
+        run: ./scripts/ci.sh
+
+      - name: Build wheel and sdist
+        run: uv build --no-build-isolation
+
+      - name: Check frontend static asset syntax
+        run: node --check src/cerberus/ui/static/app.js
+
+      - name: Check compose configuration
+        run: python scripts/check-compose.py
+
+      - name: Build container image
+        run: docker build -f Containerfile -t cerberus:release .
+
+      - name: Smoke test container runtime
+        run: ./scripts/smoke-container.sh cerberus:release
+
+      - name: Install checksum-verified Gitleaks
+        run: |
+          curl -fsSLO https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          curl -fsSLO https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_checksums.txt
+          grep '  gitleaks_8.30.1_linux_x64.tar.gz$' gitleaks_8.30.1_checksums.txt | sha256sum -c -
+          tar -xzf gitleaks_8.30.1_linux_x64.tar.gz gitleaks
+          sudo install gitleaks /usr/local/bin/gitleaks
+          rm gitleaks gitleaks_8.30.1_linux_x64.tar.gz gitleaks_8.30.1_checksums.txt
+
+      - name: Scan secrets and private history
+        run: sh scripts/scan-secrets.sh
+
+      - name: Generate SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
