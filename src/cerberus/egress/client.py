@@ -1,0 +1,113 @@
+"""OpenAI-compatible upstream call helpers and streaming usage extraction.
+
+The streaming collector and usage parser preserve the established Cerberus
+wire contract; see docs/architecture.md for the gateway boundary.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import httpx
+
+from cerberus.router.engine import Target
+
+RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def retry_after_seconds(response: httpx.Response) -> float | None:
+    value = response.headers.get("retry-after")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def token_usage(body: dict[str, Any]) -> dict[str, int] | None:
+    usage = body.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    safe_usage = {
+        key: value
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        if isinstance((value := usage.get(key)), int) and not isinstance(value, bool) and value >= 0
+    }
+    return safe_usage or None
+
+
+def reported_cost(body: dict[str, Any]) -> float | None:
+    """Return an upstream-reported cost without consulting a bundled price list."""
+
+    usage = body.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    value = usage.get("cost")
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return float(value)
+    return None
+
+
+class StreamingUsageCollector:
+    """Extract usage-only SSE fields without retaining response content."""
+
+    _MAX_LINE_BYTES = 65_536
+
+    def __init__(self) -> None:
+        self._buffer = b""
+        self.usage: dict[str, int] | None = None
+        self.reported_cost: float | None = None
+
+    def feed(self, chunk: bytes) -> None:
+        self._buffer += chunk
+        while b"\n" in self._buffer:
+            line, self._buffer = self._buffer.split(b"\n", 1)
+            self._read_line(line)
+        if len(self._buffer) > self._MAX_LINE_BYTES:
+            self._buffer = b""
+
+    def finish(self) -> None:
+        if self._buffer:
+            self._read_line(self._buffer)
+            self._buffer = b""
+
+    def _read_line(self, line: bytes) -> None:
+        line = line.strip()
+        if not line.startswith(b"data:"):
+            return
+        payload = line.removeprefix(b"data:").strip()
+        if not payload or payload == b"[DONE]":
+            return
+        try:
+            body = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+        if isinstance(body, dict):
+            if (usage := token_usage(body)) is not None:
+                self.usage = usage
+            if (cost := reported_cost(body)) is not None:
+                self.reported_cost = cost
+
+
+def build_upstream_request(
+    client: httpx.AsyncClient, target: Target, body: dict[str, Any], api_key: str
+) -> httpx.Request:
+    upstream_body = {**body, "model": target.model}
+    # Optional per-candidate reasoning budget. Absent -> nothing is added and the
+    # body is exactly what it was before this feature existed. Present -> injected
+    # only when the caller did not state one, unless the route explicitly claims
+    # precedence, so a caller's stated budget is never silently replaced.
+    if target.reasoning_effort is not None:
+        if "reasoning_effort" not in upstream_body or target.reasoning_effort_override:
+            upstream_body["reasoning_effort"] = target.reasoning_effort
+    # Same contract for chat_template_kwargs, kept as a separate field because
+    # backends honour one or the other, not both: llama.cpp ignores
+    # reasoning_effort entirely and reads this instead. Copied on the way out so
+    # the config's mapping is never aliased into a mutable request body.
+    if target.chat_template_kwargs is not None:
+        if "chat_template_kwargs" not in upstream_body or target.chat_template_kwargs_override:
+            upstream_body["chat_template_kwargs"] = dict(target.chat_template_kwargs)
+    headers = {"content-type": "application/json", "authorization": f"Bearer {api_key}"}
+    return client.build_request("POST", target.base_url + "/chat/completions", headers=headers, json=upstream_body)

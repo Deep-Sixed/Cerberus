@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<!-- Cerberus admin login. No credentials here: the button navigates to the
+     Authentik OIDC flow; Cerberus validates the result and sets a signed,
+     HttpOnly session cookie. No token ever touches HTML/JS/URL/storage. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cerberus · Sign in</title>
+<link rel="stylesheet" href="/admin/ui/app.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card">
+    <span class="logo">C</span>
+    <h1>Cerberus</h1>
+    <p class="muted">Admin console — sign in with your Authentik identity.</p>
+    <a class="btn-primary" href="/admin/login/start">Sign in with Authentik</a>
+    <p class="muted small">Access requires the Cerberus admin group. Automation uses an
+      Authentik admin-scoped bearer token (header), not this page.</p>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,69 @@
+# Cerberus example configuration — portable schema reference.
+# Secrets are env-var NAMES populated by the file-secrets bridge; never values.
+metadata:
+  version: cerberus-2026-07-16.1
+
+server:
+  host: 127.0.0.1
+  port: 4000
+
+state:
+  path: /var/lib/cerberus/cooldowns.db   # null -> in-memory (tests, dry runs)
+
+providers:
+  openrouter:
+    protocol: openai
+    base_url: https://openrouter.ai/api/v1
+    credentials:
+      primary: { api_key_env: OPENROUTER_API_KEY }
+    models:
+      openrouter/free: { cost_tier: free, capabilities: [chat, tools] }
+      anthropic/claude-sonnet: { cost_tier: paid, capabilities: [chat, tools, coding] }
+
+  google:
+    protocol: openai
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    credentials:
+      free-1: { api_key_env: GEMINI_KEY_1 }
+    models:
+      gemini-flash: { cost_tier: free, capabilities: [chat, tools] }
+    quota_cooldown_seconds: 14400   # daily free-tier quota
+    transport_cooldown_seconds: 30  # network blips never brick a provider for hours
+    quota_scope: model              # credential = one 429 cools every model on that key
+
+aliases:
+  cerberus/free:
+    mode: free                      # free-mode: paid candidates are a validation error
+    candidates:
+      - { provider: google, credential: free-1, model: gemini-flash }
+      - { provider: openrouter, credential: primary, model: openrouter/free }
+
+  cerberus/dispatch-standard:
+    mode: dispatch
+    allow_paid_fallback: true
+    candidates:
+      - { provider: openrouter, credential: primary, model: anthropic/claude-sonnet }
+      - { provider: openrouter, credential: primary, model: openrouter/free }
+
+  cerberus/fusion-code:
+    mode: fusion
+    # Deliberation is delegated to a managed backend (OpenRouter Fusion Router),
+    # so the whole panel and the judge (analyst) share one provider/credential.
+    # One fusion request is billed as every panel call plus the analyst.
+    candidates:                     # the panel
+      - { provider: openrouter, credential: primary, model: openrouter/free }
+      - { provider: openrouter, credential: primary, model: anthropic/claude-sonnet }
+    fusion:
+      backend: openrouter
+      max_panel_members: 5
+      timeout_seconds: 180
+      allow_paid_panel: true
+      judge: { provider: openrouter, credential: primary, model: openrouter/free }
+      require_human_review: true
+
+identities:
+  example-reader:
+    credential_env: CB_KEY_EXAMPLE_READER    # holds a cb- client key
+    allowed_modes: [free]           # deny-by-default: absence means denied
+    allowed_aliases: [cerberus/free]
+    default_alias: cerberus/free

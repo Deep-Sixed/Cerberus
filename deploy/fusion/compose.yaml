@@ -1,0 +1,27 @@
+name: cerberus
+services:
+  cerberus-api:
+    image: cerberus:0.01
+    build:
+      context: ../..
+      dockerfile: Containerfile
+    restart: unless-stopped
+    ports: ["127.0.0.1:4000:4101"]
+    environment:
+      CERBERUS_CONFIG: /etc/cerberus/config.yaml
+      CERBERUS_RELEASE_ID: cerberus-0.01
+      CERBERUS_API_TOKEN: ${CERBERUS_API_TOKEN:?Set CERBERUS_API_TOKEN}
+      CERBERUS_ADMIN_TOKEN: ${CERBERUS_ADMIN_TOKEN:?Set CERBERUS_ADMIN_TOKEN}
+      CB_KEY_DEV: ${CB_KEY_DEV:?Set CB_KEY_DEV}
+      # Fusion deliberation runs on OpenRouter under this key; no worker service.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?Set OPENROUTER_API_KEY}
+    volumes:
+      - ../../config/fusion-dev.yaml:/etc/cerberus/config.yaml:ro
+      - cerberus-state:/var/lib/cerberus
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4101/health', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+volumes:
+  cerberus-state:

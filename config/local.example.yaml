@@ -1,0 +1,21 @@
+# Local development: export LOCAL_API_KEY=local-no-auth for a server without auth.
+# This placeholder satisfies credential validation; use a real key if your server requires it.
+metadata:
+  version: cerberus-2026-09-14.1
+server:
+  host: 127.0.0.1
+  port: 4111
+state: {path: null}
+telemetry: {}
+providers:
+  local:
+    base_url: http://127.0.0.1:8080/v1
+    credentials:
+      local: {api_key_env: LOCAL_API_KEY}
+    models:
+      local-model: {cost_tier: free, capabilities: [chat]}
+aliases:
+  cerberus/local:
+    mode: dispatch
+    candidates:
+      - {provider: local, credential: local, model: local-model}

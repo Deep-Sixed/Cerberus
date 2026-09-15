@@ -1,0 +1,54 @@
+# Cerberus fusion config (cerberus-api side).
+# Adds a fusion alias to the dev slice. Deliberation runs on OpenRouter's managed
+# Fusion Router under the alias's own OpenRouter credential; there is no second
+# service. Secrets are env-var NAMES resolved by the entrypoint bridge.
+metadata:
+  version: cerberus-2026-09-14.1
+
+server:
+  host: 0.0.0.0
+  port: 4101
+  api_token_env: CERBERUS_API_TOKEN
+  admin_token_env: CERBERUS_ADMIN_TOKEN
+
+state:
+  path: /var/lib/cerberus/cooldowns.sqlite3
+
+telemetry: {}
+
+providers:
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    credentials:
+      main: { api_key_env: OPENROUTER_API_KEY }
+    models:
+      google/gemma-4-26b-a4b-it:free: { cost_tier: free, capabilities: [chat] }
+      qwen/qwen3-coder:free: { cost_tier: free, capabilities: [chat, coding] }
+
+identities:
+  # human/agent caller: may use dispatch + fusion
+  dev:
+    credential_env: CB_KEY_DEV
+    allowed_modes: [dispatch, fusion]
+    allowed_aliases: [cerberus/dispatch-dev, cerberus/fusion-dev]
+    default_alias: cerberus/dispatch-dev
+
+aliases:
+  cerberus/dispatch-dev:
+    mode: dispatch
+    candidates:
+      - { provider: openrouter, credential: main, model: "google/gemma-4-26b-a4b-it:free" }
+
+  # A fusion request is one OpenRouter call that fans out to every panel model
+  # plus the analyst, so it is billed as the sum of those completions.
+  cerberus/fusion-dev:
+    mode: fusion
+    candidates:                     # the panel (OpenRouter Fusion analysis_models)
+      - { provider: openrouter, credential: main, model: "google/gemma-4-26b-a4b-it:free" }
+      - { provider: openrouter, credential: main, model: "qwen/qwen3-coder:free" }
+    fusion:
+      backend: openrouter
+      max_panel_members: 5
+      timeout_seconds: 120
+      allow_paid_panel: false
+      judge: { provider: openrouter, credential: main, model: "google/gemma-4-26b-a4b-it:free" }

@@ -1,0 +1,45 @@
+# Cerberus container default configuration (mounted at /etc/cerberus/config.yaml).
+# This file validates against the Cerberus registry schema. Secrets are env-var
+# NAMES resolved by the
+# entrypoint file-secrets bridge (/run/secrets/*); never values.
+metadata:
+  version: cerberus-2026-07-17.2
+
+server:
+  host: 0.0.0.0                       # in-container bind; publish loopback-only on the host
+  port: 4101
+  api_token_env: CERBERUS_API_TOKEN   # inference surface (when identities are bypassed)
+  admin_token_env: CERBERUS_ADMIN_TOKEN  # remote read-only admin; mutations stay loopback-only
+
+state:
+  path: /var/lib/cerberus/cooldowns.sqlite3   # mount a writable volume here
+
+telemetry: {}                         # enable with your telemetry endpoint and bearer token file
+
+providers:
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    credentials:
+      main: { api_key_env: OPENROUTER_API_KEY }
+    models:
+      google/gemma-4-26b-a4b-it:free: { cost_tier: free, capabilities: [chat] }
+      anthropic/claude-sonnet-4.5: { cost_tier: paid, capabilities: [chat, tools, coding] }
+
+identities:
+  dev:
+    credential_env: CB_KEY_DEV
+    allowed_modes: [dispatch, free]
+    allowed_aliases: [cerberus/dispatch-dev, cerberus/free-dev]
+    default_alias: cerberus/dispatch-dev
+
+aliases:
+  cerberus/dispatch-dev:
+    mode: dispatch
+    candidates:
+      - { provider: openrouter, credential: main, model: "google/gemma-4-26b-a4b-it:free" }
+
+  # Free Router: free-only. A paid candidate here is a config-load error.
+  cerberus/free-dev:
+    mode: free
+    candidates:
+      - { provider: openrouter, credential: main, model: "google/gemma-4-26b-a4b-it:free" }

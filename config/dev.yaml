@@ -1,0 +1,46 @@
+# Cerberus development configuration — Dispatch + Free Router vertical slices, native run.
+# One provider, one credential NAME (value comes from the environment). The
+# registry declares a free and a paid model so free-only enforcement is
+# demonstrable, not vacuous. No fusion. Telemetry disabled.
+# Secrets are env-var NAMES only; never place values in this file.
+metadata:
+  version: cerberus-2026-07-17.2
+
+server:
+  host: 127.0.0.1
+  port: 4102   # native development listener
+
+state:
+  path: var/cooldowns.sqlite3   # repo-relative, gitignored; survives restarts
+
+telemetry: {}                   # optional telemetry is disabled
+
+providers:
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    credentials:
+      main: { api_key_env: OPENROUTER_API_KEY }
+    models:
+      google/gemma-4-26b-a4b-it:free: { cost_tier: free, capabilities: [chat] }
+      anthropic/claude-sonnet-4.5: { cost_tier: paid, capabilities: [chat, tools, coding] }
+
+identities:
+  dev:
+    credential_env: CB_KEY_DEV
+    allowed_modes: [dispatch, free]
+    allowed_aliases: [cerberus/dispatch-dev, cerberus/free-dev]
+    default_alias: cerberus/dispatch-dev
+
+aliases:
+  # Dispatch: ordered candidates, paid fallback allowed by policy (none configured here).
+  cerberus/dispatch-dev:
+    mode: dispatch
+    candidates:
+      - { provider: openrouter, credential: main, model: "google/gemma-4-26b-a4b-it:free" }
+
+  # Free Router: free-only. A paid candidate here is a config-load error; the
+  # runtime cost gate is defense in depth. No implicit free->paid, ever.
+  cerberus/free-dev:
+    mode: free
+    candidates:
+      - { provider: openrouter, credential: main, model: "google/gemma-4-26b-a4b-it:free" }
