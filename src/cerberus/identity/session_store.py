@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,64 +104,72 @@ class SqliteSessionStore:
     def __init__(self, path: str | Path) -> None:
         db_path = Path(path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(db_path, check_same_thread=False)
-        # WAL + a busy timeout so concurrent workers don't trip over each other's writes
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA busy_timeout=5000")
-        self._connection.executescript(_SCHEMA)
-        self._connection.commit()
+        self._lock = threading.RLock()
+        with self._lock:
+            self._connection = sqlite3.connect(db_path, check_same_thread=False)
+            # WAL + a busy timeout so concurrent workers don't trip over each other's writes
+            self._connection.execute("PRAGMA journal_mode=WAL")
+            self._connection.execute("PRAGMA busy_timeout=5000")
+            self._connection.executescript(_SCHEMA)
+            self._connection.commit()
 
     def put_pending(self, state: str, nonce: str, verifier: str, expires: float) -> None:
-        self._connection.execute(
-            "INSERT INTO oidc_pending (state, nonce, verifier, expires) VALUES (?, ?, ?, ?)"
-            " ON CONFLICT(state) DO UPDATE SET nonce=excluded.nonce,"
-            " verifier=excluded.verifier, expires=excluded.expires",
-            (state, nonce, verifier, expires),
-        )
-        self._connection.commit()
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO oidc_pending (state, nonce, verifier, expires) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(state) DO UPDATE SET nonce=excluded.nonce,"
+                " verifier=excluded.verifier, expires=excluded.expires",
+                (state, nonce, verifier, expires),
+            )
+            self._connection.commit()
 
     def pop_pending(self, state: str, *, now: float | None = None) -> Pending | None:
         current = time.time() if now is None else now
-        # atomic single-use: the DELETE both consumes the row and returns it, so two
-        # concurrent callbacks for one state cannot both read it as still-present
-        row = self._connection.execute(
-            "DELETE FROM oidc_pending WHERE state=? RETURNING nonce, verifier, expires",
-            (state,),
-        ).fetchone()
-        self._connection.execute("DELETE FROM oidc_pending WHERE expires <= ?", (current,))  # gc
-        self._connection.commit()
+        with self._lock:
+            # atomic single-use: the DELETE both consumes the row and returns it, so two
+            # concurrent callbacks for one state cannot both read it as still-present
+            row = self._connection.execute(
+                "DELETE FROM oidc_pending WHERE state=? RETURNING nonce, verifier, expires",
+                (state,),
+            ).fetchone()
+            self._connection.execute("DELETE FROM oidc_pending WHERE expires <= ?", (current,))  # gc
+            self._connection.commit()
         if row is None or row[2] <= current:
             return None
         return (row[0], row[1], row[2])
 
     def put_session(self, sid: str, session: AdminSession) -> None:
-        self._connection.execute(
-            "INSERT INTO admin_sessions (sid, sub, email, name, groups, expires)"
-            " VALUES (?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(sid) DO UPDATE SET sub=excluded.sub, email=excluded.email,"
-            " name=excluded.name, groups=excluded.groups, expires=excluded.expires",
-            (sid, session.sub, session.email, session.name, json.dumps(session.groups), session.expires),
-        )
-        self._connection.commit()
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO admin_sessions (sid, sub, email, name, groups, expires)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(sid) DO UPDATE SET sub=excluded.sub, email=excluded.email,"
+                " name=excluded.name, groups=excluded.groups, expires=excluded.expires",
+                (sid, session.sub, session.email, session.name, json.dumps(session.groups), session.expires),
+            )
+            self._connection.commit()
 
     def get_session(self, sid: str, *, now: float | None = None) -> AdminSession | None:
         current = time.time() if now is None else now
-        row = self._connection.execute(
-            "SELECT sub, email, name, groups, expires FROM admin_sessions WHERE sid=?",
-            (sid,),
-        ).fetchone()
-        if row is None:
-            return None
-        sub, email, name, groups, expires = row
-        if current > expires:
-            self._connection.execute("DELETE FROM admin_sessions WHERE sid=?", (sid,))
-            self._connection.commit()
-            return None
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT sub, email, name, groups, expires FROM admin_sessions WHERE sid=?",
+                (sid,),
+            ).fetchone()
+            if row is None:
+                return None
+            sub, email, name, groups, expires = row
+            if current > expires:
+                self._connection.execute("DELETE FROM admin_sessions WHERE sid=?", (sid,))
+                self._connection.commit()
+                return None
         return AdminSession(sub=sub, email=email, name=name, groups=json.loads(groups), expires=expires)
 
     def delete_session(self, sid: str) -> None:
-        self._connection.execute("DELETE FROM admin_sessions WHERE sid=?", (sid,))
-        self._connection.commit()
+        with self._lock:
+            self._connection.execute("DELETE FROM admin_sessions WHERE sid=?", (sid,))
+            self._connection.commit()
 
     def close(self) -> None:
-        self._connection.close()
+        with self._lock:
+            self._connection.close()

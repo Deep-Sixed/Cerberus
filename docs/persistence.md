@@ -8,15 +8,17 @@ with OIDC enabled it also includes pending login and session state. Credential
 columns are reference names, never provider API-key or client-token values.
 
 The session store uses WAL, a five-second busy timeout and atomic
-`DELETE ... RETURNING` to consume a login state once. Tests cover two store
-connections and app instances plus restart recovery. These do not prove general
-multi-worker routing consistency: the cooldown store checks then writes in
-separate statements, so competing writers can shorten an existing deadline.
-Expiry cleanup also selects then deletes without a conditional expiry predicate.
-The smallest safe release restriction is one gateway process per routing domain.
-Before supporting multiple writers, use conditional atomic UPSERT/deletion and
-add real concurrent-process tests. Multi-host policy/state coordination needs a
-separate design; merely replacing SQLite would not solve process-local activation.
+`DELETE ... RETURNING` to consume a login state once. The cooldown store uses an
+atomic `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` upsert so competing
+writers resolve deadlines atomically: the maximum `retry_at` wins, and scope,
+reason, and returned Python state correspond to the winning row. Lazy expiry
+deletion includes the observed expiry predicate (`AND retry_at <= ?`) so a stale
+reader cannot delete a subsequently refreshed cooldown. Defensive `threading.RLock()`
+guards protect shared-connection access within each process.
+
+SQLite remains single-host persistence; this does not claim multi-host coordination.
+Multi-host policy/state coordination needs a separate design; merely replacing SQLite
+would not solve process-local activation.
 
 Schema setup uses `CREATE TABLE IF NOT EXISTS` and records control schema version
 1; there is not yet an upgrade runner, automatic corruption recovery or backup
