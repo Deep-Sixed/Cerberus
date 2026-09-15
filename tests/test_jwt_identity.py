@@ -142,7 +142,7 @@ async def test_symmetric_algorithms_are_never_accepted(monkeypatch):
     """HS256 tokens (the client-federation population) must not blur into robot auth."""
     forged = jwt.encode(
         {"iss": ISSUER, "aud": AUDIENCE, "exp": int(time.time()) + 300, "client_id": "robot-recon"},
-        "guessable-shared-secret",
+        "guessable-shared-secret-32-bytes-long!",
         algorithm="HS256",
         headers={"kid": "k1"},
     )

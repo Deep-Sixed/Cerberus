@@ -7,6 +7,7 @@ wall-clock retry_at. Postgres is deliberately not required.
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -29,9 +30,11 @@ class SqliteCooldownStore:
     def __init__(self, path: str | Path) -> None:
         db_path = Path(path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(db_path, check_same_thread=False)
-        self._connection.execute(_SCHEMA)
-        self._connection.commit()
+        self._lock = threading.RLock()
+        with self._lock:
+            self._connection = sqlite3.connect(db_path, check_same_thread=False)
+            self._connection.execute(_SCHEMA)
+            self._connection.commit()
 
     @staticmethod
     def _key(scope: CooldownScope, credential: str | None, model: str | None) -> tuple[str, str]:
@@ -55,62 +58,77 @@ class SqliteCooldownStore:
         started = time.time() if now is None else now
         retry_at = started + max(1.0, duration_seconds)
         credential_key, model_key = self._key(scope, credential, model)
-        row = self._connection.execute(
-            "SELECT retry_at, scope, reason FROM cooldowns WHERE provider=? AND credential=? AND model=?",
-            (provider, credential_key, model_key),
-        ).fetchone()
-        if row is not None and row[0] >= retry_at:
-            # a later retry_at always wins; never shorten an active cooldown
-            return Cooldown(
-                scope=row[1], provider=provider,
-                credential=credential_key or None, model=model_key or None,
-                reason=row[2], retry_at=row[0],
+        with self._lock:
+            cursor = self._connection.execute(
+                "INSERT INTO cooldowns ("
+                "    provider,"
+                "    credential,"
+                "    model,"
+                "    scope,"
+                "    reason,"
+                "    retry_at"
+                ")"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(provider, credential, model)"
+                " DO UPDATE SET"
+                "    scope = CASE"
+                "        WHEN excluded.retry_at > cooldowns.retry_at"
+                "        THEN excluded.scope"
+                "        ELSE cooldowns.scope"
+                "    END,"
+                "    reason = CASE"
+                "        WHEN excluded.retry_at > cooldowns.retry_at"
+                "        THEN excluded.reason"
+                "        ELSE cooldowns.reason"
+                "    END,"
+                "    retry_at = MAX(cooldowns.retry_at, excluded.retry_at)"
+                " RETURNING scope, reason, retry_at",
+                (provider, credential_key, model_key, scope, reason, retry_at),
             )
-        self._connection.execute(
-            "INSERT INTO cooldowns (provider, credential, model, scope, reason, retry_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(provider, credential, model)"
-            " DO UPDATE SET scope=excluded.scope, reason=excluded.reason, retry_at=excluded.retry_at",
-            (provider, credential_key, model_key, scope, reason, retry_at),
-        )
-        self._connection.commit()
+            winning_scope, winning_reason, winning_retry_at = cursor.fetchone()
+            self._connection.commit()
         return Cooldown(
-            scope=scope, provider=provider,
-            credential=credential_key or None, model=model_key or None,
-            reason=reason, retry_at=retry_at,
+            scope=winning_scope,
+            provider=provider,
+            credential=credential_key or None,
+            model=model_key or None,
+            reason=winning_reason,
+            retry_at=winning_retry_at,
         )
 
     def active_for(
         self, provider: str, credential: str, model: str, *, now: float | None = None
     ) -> Cooldown | None:
         current = time.time() if now is None else now
-        for credential_key, model_key in ((credential, model), (credential, ""), ("", "")):
-            row = self._connection.execute(
-                "SELECT scope, reason, retry_at FROM cooldowns WHERE provider=? AND credential=? AND model=?",
-                (provider, credential_key, model_key),
-            ).fetchone()
-            if row is None:
-                continue
-            scope, reason, retry_at = row
-            if retry_at > current:
-                return Cooldown(
-                    scope=scope, provider=provider,
-                    credential=credential_key or None, model=model_key or None,
-                    reason=reason, retry_at=retry_at,
+        with self._lock:
+            for credential_key, model_key in ((credential, model), (credential, ""), ("", "")):
+                row = self._connection.execute(
+                    "SELECT scope, reason, retry_at FROM cooldowns WHERE provider=? AND credential=? AND model=?",
+                    (provider, credential_key, model_key),
+                ).fetchone()
+                if row is None:
+                    continue
+                scope, reason, retry_at = row
+                if retry_at > current:
+                    return Cooldown(
+                        scope=scope, provider=provider,
+                        credential=credential_key or None, model=model_key or None,
+                        reason=reason, retry_at=retry_at,
+                    )
+                self._connection.execute(
+                    "DELETE FROM cooldowns WHERE provider=? AND credential=? AND model=? AND retry_at <= ?",
+                    (provider, credential_key, model_key, current),
                 )
-            self._connection.execute(
-                "DELETE FROM cooldowns WHERE provider=? AND credential=? AND model=?",
-                (provider, credential_key, model_key),
-            )
-            self._connection.commit()
-        return None
+                self._connection.commit()
+            return None
 
     def snapshot(self, *, now: float | None = None) -> list[dict]:
         current = time.time() if now is None else now
-        rows = self._connection.execute(
-            "SELECT provider, credential, model, scope, reason, retry_at FROM cooldowns WHERE retry_at > ?",
-            (current,),
-        ).fetchall()
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT provider, credential, model, scope, reason, retry_at FROM cooldowns WHERE retry_at > ?",
+                (current,),
+            ).fetchall()
         active = [
             {
                 "scope": scope,
@@ -125,4 +143,5 @@ class SqliteCooldownStore:
         return sorted(active, key=lambda entry: (entry["provider"], entry["scope"]))
 
     def close(self) -> None:
-        self._connection.close()
+        with self._lock:
+            self._connection.close()

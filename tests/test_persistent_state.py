@@ -1,5 +1,6 @@
 """Session 3 acceptance tests — cooldowns survive restart; scope escalation policy."""
 
+import threading
 import time
 
 import httpx
@@ -143,3 +144,162 @@ async def test_cooldown_survives_app_restart(monkeypatch, tmp_path):
 
     assert response.status_code == 503  # still cooled from before the restart
     assert upstream_calls == 0
+
+
+def test_competing_connections_never_shorten_cooldown(tmp_path):
+    db_file = tmp_path / "shared_cooldowns.db"
+    store_a = SqliteCooldownStore(db_file)
+    store_b = SqliteCooldownStore(db_file)
+
+    now = 1_000_000.0
+    # 1. Connection A applies a longer cooldown
+    long_cooldown = store_a.apply(
+        scope="model",
+        provider="provider-x",
+        credential="cred-1",
+        model="model-a",
+        reason="long_outage",
+        duration_seconds=600,
+        now=now,
+    )
+    assert long_cooldown.retry_at == now + 600
+    assert long_cooldown.scope == "model"
+    assert long_cooldown.reason == "long_outage"
+
+    # 2. Connection B subsequently proposes a shorter cooldown
+    short_proposed = store_b.apply(
+        scope="model",
+        provider="provider-x",
+        credential="cred-1",
+        model="model-a",
+        reason="short_glitch",
+        duration_seconds=30,
+        now=now,
+    )
+
+    # 3. The persisted cooldown remains the longer one
+    active_b = store_b.active_for("provider-x", "cred-1", "model-a", now=now)
+    assert active_b is not None
+    assert active_b.retry_at == now + 600
+
+    # 4. Connection B's apply() return value reports the longer winning deadline
+    assert short_proposed.retry_at == now + 600
+
+    # 5. Scope and reason correspond to the winning row
+    assert active_b.scope == "model"
+    assert active_b.reason == "long_outage"
+    assert short_proposed.scope == "model"
+    assert short_proposed.reason == "long_outage"
+
+    store_a.close()
+    store_b.close()
+
+
+def test_concurrent_threads_competing_cooldowns(tmp_path):
+    db_file = tmp_path / "concurrent_cooldowns.db"
+    store_a = SqliteCooldownStore(db_file)
+    store_b = SqliteCooldownStore(db_file)
+
+    now = 1_000_000.0
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def run_a():
+        barrier.wait()
+        results["a"] = store_a.apply(
+            scope="model",
+            provider="provider-y",
+            credential="cred-1",
+            model="model-b",
+            reason="longer_timeout",
+            duration_seconds=300,
+            now=now,
+        )
+
+    def run_b():
+        barrier.wait()
+        results["b"] = store_b.apply(
+            scope="model",
+            provider="provider-y",
+            credential="cred-1",
+            model="model-b",
+            reason="shorter_timeout",
+            duration_seconds=60,
+            now=now,
+        )
+
+    t_a = threading.Thread(target=run_a)
+    t_b = threading.Thread(target=run_b)
+    t_a.start()
+    t_b.start()
+    t_a.join()
+    t_b.join()
+
+    # The maximum retry_at wins, and both stores see the winning persisted record
+    active_a = store_a.active_for("provider-y", "cred-1", "model-b", now=now)
+    active_b = store_b.active_for("provider-y", "cred-1", "model-b", now=now)
+    assert active_a is not None and active_b is not None
+    assert active_a.retry_at == now + 300
+    assert active_b.retry_at == now + 300
+    assert active_a.reason == "longer_timeout"
+    assert active_b.reason == "longer_timeout"
+
+    store_a.close()
+    store_b.close()
+
+
+def test_conditional_expiry_cleanup_does_not_delete_refreshed_cooldown(tmp_path):
+    db_file = tmp_path / "expiry_cooldowns.db"
+    store_a = SqliteCooldownStore(db_file)
+    store_b = SqliteCooldownStore(db_file)
+
+    t0 = 1_000_000.0
+    # 1. Initial cooldown expiring at t0 + 10
+    store_a.apply(
+        scope="model",
+        provider="provider-z",
+        credential="cred-1",
+        model="model-c",
+        reason="initial",
+        duration_seconds=10,
+        now=t0,
+    )
+
+    t_expired = t0 + 20  # now expired
+    # Connection A observes an expired row
+    with store_a._lock:
+        row = store_a._connection.execute(
+            "SELECT scope, reason, retry_at FROM cooldowns WHERE provider=? AND credential=? AND model=?",
+            ("provider-z", "cred-1", "model-c"),
+        ).fetchone()
+        assert row is not None
+        assert row[2] <= t_expired
+
+    # 2. Connection B refreshes that same cooldown
+    refreshed = store_b.apply(
+        scope="model",
+        provider="provider-z",
+        credential="cred-1",
+        model="model-c",
+        reason="refreshed_outage",
+        duration_seconds=300,
+        now=t_expired,
+    )
+    assert refreshed.retry_at == t_expired + 300
+
+    # 3. Connection A runs its conditional cleanup for the observed expired timestamp
+    with store_a._lock:
+        store_a._connection.execute(
+            "DELETE FROM cooldowns WHERE provider=? AND credential=? AND model=? AND retry_at <= ?",
+            ("provider-z", "cred-1", "model-c", t_expired),
+        )
+        store_a._connection.commit()
+
+    # 4. A's conditional cleanup cannot remove the refreshed row; subsequent lookup returns the refreshed cooldown
+    active = store_a.active_for("provider-z", "cred-1", "model-c", now=t_expired + 5)
+    assert active is not None
+    assert active.retry_at == t_expired + 300
+    assert active.reason == "refreshed_outage"
+
+    store_a.close()
+    store_b.close()
