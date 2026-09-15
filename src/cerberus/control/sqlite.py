@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,13 +18,23 @@ from typing import Any
 from cerberus.registry.loader import ConfigDocument, require_configured_credentials
 from cerberus.registry.schema import CerberusConfig
 
+# Control schema version this build reads and writes. Version 2 adds
+# provider_health.expires_at; see SqliteControlPlane._migrate().
+CONTROL_SCHEMA_VERSION = 2
+
+# How long a provider-wide `down` verdict excludes a provider from routing.
+# Deliberately short: `down` is a coarse, provider-wide exclusion, while real
+# per-request failures are already handled at the right scope by the cooldown
+# store. A `down` state must never outlive the observation that produced it.
+DOWN_TTL_SECONDS = 60.0
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS control_schema (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     version INTEGER NOT NULL
 );
-INSERT OR IGNORE INTO control_schema(singleton, version) VALUES (1, 1);
+INSERT OR IGNORE INTO control_schema(singleton, version) VALUES (1, 2);
 
 CREATE TABLE IF NOT EXISTS config_revisions (
     revision TEXT PRIMARY KEY,
@@ -111,12 +122,19 @@ CREATE TABLE IF NOT EXISTS control_activation (
     activated_at TEXT NOT NULL
 );
 
+-- provider_health.expires_at is the wall-clock expiry of a `down` verdict, NULL
+-- for every other status. Absolute (not monotonic) so it survives restart,
+-- matching the cooldown store; a `down` row past its expiry excludes nothing.
+-- Kept out of the CREATE TABLE body deliberately: SQLite stores that text
+-- verbatim and re-parses it on ALTER TABLE ... DROP COLUMN, where before 3.46 an
+-- inline `--` comment leaves a dangling comma and fails with "incomplete input".
 CREATE TABLE IF NOT EXISTS provider_health (
     provider TEXT PRIMARY KEY,
     status TEXT NOT NULL CHECK (status IN ('unknown', 'healthy', 'degraded', 'down')),
     checked_at TEXT NOT NULL,
     latency_ms REAL,
-    detail TEXT
+    detail TEXT,
+    expires_at REAL
 );
 
 CREATE TABLE IF NOT EXISTS routing_events (
@@ -166,20 +184,53 @@ class SqliteControlPlane:
         self._connection.execute("PRAGMA busy_timeout=5000")
         self._connection.execute("PRAGMA foreign_keys=ON")
         self._connection.executescript(_SCHEMA)
-        schema_version = self._connection.execute(
-            "SELECT version FROM control_schema WHERE singleton=1"
-        ).fetchone()[0]
-        if schema_version != 1:
-            self._connection.close()
-            raise RuntimeError(
-                f"unsupported Cerberus control schema version {schema_version}; expected 1"
-            )
+        self._migrate()
         self._connection.commit()
         self._health = self._load_health()
 
-    def _load_health(self) -> dict[str, str]:
-        rows = self._connection.execute("SELECT provider, status FROM provider_health").fetchall()
-        return {str(row["provider"]): str(row["status"]) for row in rows}
+    def _migrate(self) -> None:
+        """Bring an existing database up to CONTROL_SCHEMA_VERSION, or refuse it.
+
+        v1 -> v2 adds provider_health.expires_at and retires the permanent `down`
+        rows v1 could produce. Before v2 a `down` verdict had no expiry at all: it
+        survived restart and was cleared only by a later successful probe, so one
+        transient failure could hold a provider out of routing indefinitely. Those
+        rows are marked already-expired rather than deleted, so the recorded
+        verdict stays visible while no longer excluding anything.
+        """
+
+        version = self._connection.execute(
+            "SELECT version FROM control_schema WHERE singleton=1"
+        ).fetchone()[0]
+        if version == 1:
+            columns = {
+                str(row["name"]) for row in self._connection.execute("PRAGMA table_info(provider_health)")
+            }
+            if "expires_at" not in columns:
+                self._connection.execute("ALTER TABLE provider_health ADD COLUMN expires_at REAL")
+            self._connection.execute(
+                "UPDATE provider_health SET expires_at=? WHERE status='down' AND expires_at IS NULL",
+                (time.time(),),
+            )
+            self._connection.execute(
+                "UPDATE control_schema SET version=? WHERE singleton=1", (CONTROL_SCHEMA_VERSION,)
+            )
+            version = CONTROL_SCHEMA_VERSION
+        if version != CONTROL_SCHEMA_VERSION:
+            self._connection.close()
+            raise RuntimeError(
+                f"unsupported Cerberus control schema version {version}; "
+                f"expected {CONTROL_SCHEMA_VERSION}"
+            )
+
+    def _load_health(self) -> dict[str, tuple[str, float | None]]:
+        rows = self._connection.execute(
+            "SELECT provider, status, expires_at FROM provider_health"
+        ).fetchall()
+        return {
+            str(row["provider"]): (str(row["status"]), row["expires_at"])
+            for row in rows
+        }
 
     def bootstrap(self, initial: ConfigDocument) -> ConfigDocument:
         """Seed an empty database, or restore its atomically active revision."""
@@ -325,10 +376,21 @@ class SqliteControlPlane:
             ).fetchone()
         return {"storage": "sqlite", **(dict(row) if row is not None else {})}
 
-    def provider_available(self, provider: str) -> bool:
-        """Health may exclude a configured provider; it can never add one."""
+    def provider_available(self, provider: str, *, now: float | None = None) -> bool:
+        """Health may exclude a configured provider; it can never add one.
 
-        return self._health.get(provider, "unknown") != "down"
+        Read from the in-memory snapshot and evaluated in memory — this runs on
+        every routed request, so it must issue no SQL. Only an unexpired `down`
+        excludes: a `down` whose expiry has passed, or one carrying no expiry at
+        all (a pre-v2 row this process never migrated), is treated as available.
+        `down` is temporary by construction and is never a permanent tombstone.
+        """
+
+        status, expires_at = self._health.get(provider, ("unknown", None))
+        if status != "down":
+            return True
+        current = time.time() if now is None else now
+        return not (expires_at is not None and expires_at > current)
 
     def set_provider_health(
         self,
@@ -337,18 +399,26 @@ class SqliteControlPlane:
         *,
         latency_ms: float | None = None,
         detail: str | None = None,
+        ttl_seconds: float | None = None,
+        now: float | None = None,
     ) -> None:
+        """Record a provider verdict. A `down` always carries a bounded expiry."""
+
         if status not in {"unknown", "healthy", "degraded", "down"}:
             raise ValueError(f"invalid provider health status {status!r}")
         checked_at = _now()
+        expires_at: float | None = None
+        if status == "down":
+            started = time.time() if now is None else now
+            expires_at = started + max(1.0, DOWN_TTL_SECONDS if ttl_seconds is None else ttl_seconds)
         with self._lock, self._connection:
             self._connection.execute(
-                "INSERT INTO provider_health VALUES (?, ?, ?, ?, ?) "
+                "INSERT INTO provider_health VALUES (?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(provider) DO UPDATE SET status=excluded.status, checked_at=excluded.checked_at, "
-                "latency_ms=excluded.latency_ms, detail=excluded.detail",
-                (provider, status, checked_at, latency_ms, detail),
+                "latency_ms=excluded.latency_ms, detail=excluded.detail, expires_at=excluded.expires_at",
+                (provider, status, checked_at, latency_ms, detail, expires_at),
             )
-            self._health = {**self._health, provider: status}
+            self._health = {**self._health, provider: (status, expires_at)}
 
     def record_routing_event(self, payload: dict[str, Any]) -> None:
         """Persist a redacted event and its accounting projection atomically."""

@@ -21,8 +21,12 @@ Multi-host policy/state coordination needs a separate design; merely replacing S
 would not solve process-local activation.
 
 Schema setup uses `CREATE TABLE IF NOT EXISTS` and records control schema version
-1; there is not yet an upgrade runner, automatic corruption recovery or backup
-command. `state.path` is the boot-time control-plane locator and cannot change
+2. A forward-only upgrade runner migrates an existing database at open; a version
+newer than this build's is refused rather than opened. The 1 -> 2 upgrade adds
+`provider_health.expires_at` and retires the permanent `down` verdicts version 1
+could record — those rows are marked already-expired, so an upgrade never carries
+a provider exclusion that predates it. There is not yet automatic corruption
+recovery or a backup command. `state.path` is the boot-time control-plane locator and cannot change
 between revisions stored in that database. Opening an invalid database raises an
 error; the service does not silently fall back to an empty store. Preserve the
 damaged file for investigation and restore a validated backup. Session expiry
