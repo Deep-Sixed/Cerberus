@@ -122,15 +122,18 @@ CREATE TABLE IF NOT EXISTS control_activation (
     activated_at TEXT NOT NULL
 );
 
+-- provider_health.expires_at is the wall-clock expiry of a `down` verdict, NULL
+-- for every other status. Absolute (not monotonic) so it survives restart,
+-- matching the cooldown store; a `down` row past its expiry excludes nothing.
+-- Kept out of the CREATE TABLE body deliberately: SQLite stores that text
+-- verbatim and re-parses it on ALTER TABLE ... DROP COLUMN, where before 3.46 an
+-- inline `--` comment leaves a dangling comma and fails with "incomplete input".
 CREATE TABLE IF NOT EXISTS provider_health (
     provider TEXT PRIMARY KEY,
     status TEXT NOT NULL CHECK (status IN ('unknown', 'healthy', 'degraded', 'down')),
     checked_at TEXT NOT NULL,
     latency_ms REAL,
     detail TEXT,
-    -- Wall-clock expiry for a `down` verdict, NULL for every other status.
-    -- Absolute (not monotonic) so it survives restart, matching the cooldown
-    -- store. A `down` row whose expiry has passed no longer excludes anything.
     expires_at REAL
 );
 

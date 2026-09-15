@@ -291,9 +291,23 @@ def test_v1_permanent_down_rows_are_retired_on_upgrade(tmp_path):
     control = SqliteControlPlane(state_path)
     control.close()
 
-    # rewind to the v1 shape: no expires_at column, version 1, a permanent down
+    # Rewind to the v1 shape by rebuilding provider_health from the historical v1
+    # definition. Not ALTER TABLE ... DROP COLUMN: a real v1 database was never a
+    # v2 one with a column removed, and DROP COLUMN re-parses the stored schema
+    # text, which makes this setup depend on the host's SQLite version.
     connection = sqlite3.connect(state_path)
-    connection.execute("ALTER TABLE provider_health DROP COLUMN expires_at")
+    connection.execute("DROP TABLE provider_health")
+    connection.execute(
+        """
+        CREATE TABLE provider_health (
+            provider TEXT PRIMARY KEY,
+            status TEXT NOT NULL CHECK (status IN ('unknown', 'healthy', 'degraded', 'down')),
+            checked_at TEXT NOT NULL,
+            latency_ms REAL,
+            detail TEXT
+        )
+        """
+    )
     connection.execute(
         "INSERT INTO provider_health (provider, status, checked_at, latency_ms, detail)"
         " VALUES ('alpha', 'down', '2026-01-01T00:00:00+00:00', NULL, 'ConnectTimeout')"
