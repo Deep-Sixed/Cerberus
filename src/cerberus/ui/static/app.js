@@ -8,7 +8,8 @@
 "use strict";
 
 const ENDPOINTS = {
-  health: "/health",
+  // diagnostics live behind the admin boundary; public /health is liveness only
+  health: "/admin/health",
   status: "/admin/status",
   config: "/admin/config/active",
   schema: "/admin/config/schema",

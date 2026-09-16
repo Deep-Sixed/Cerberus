@@ -107,7 +107,7 @@ async def test_credential_scoped_429_disables_sibling_models(monkeypatch, tmp_pa
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post("/v1/chat/completions", json={"model": "cerberus/free", "messages": []})
-            health = await client.get("/health")
+            health = await client.get("/admin/health")
 
     assert response.status_code == 503
     assert calls == ["g-one"]  # g-two never attempted: credential-wide cooldown applied
