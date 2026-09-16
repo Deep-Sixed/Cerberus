@@ -584,7 +584,7 @@ function renderView() {
     fusion: viewFusion,
     providers: viewProviders,
     health: viewHealth,
-    routes: () => pending("Route topology arrives in PR #13",
+    routes: () => pending("Route topology arrives in work package #13",
       "The route path, its failover ladder and the route inspector are the next work package. This shell reserves their place; nothing is rendered from guesswork."),
     audit: () => pending("No read-only audit endpoint",
       "Cerberus records revision registrations and activations, but 0.2.0 exposes no endpoint to read them. The screen stays empty until that endpoint exists rather than inventing a history.", true),

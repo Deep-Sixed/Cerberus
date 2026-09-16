@@ -518,5 +518,5 @@ async def test_deferred_surfaces_are_named_not_faked(monkeypatch, tmp_path):
 
     app = make_app(monkeypatch, tmp_path)
     script = (await fetch(app, "/admin/ui/app.js")).text
-    assert "PR #13" in script, "the routes view must name the work package that fills it"
+    assert "work package #13" in script, "the routes view must name the work package that fills it"
     assert "no read-only audit endpoint" in script.lower()
