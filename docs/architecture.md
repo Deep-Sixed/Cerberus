@@ -43,8 +43,17 @@ per-request failures are excluded at their own scope by the cooldown store.
 Normal label lookup reads the in-memory snapshot and performs no SQL.
 Routing and usage records are written asynchronously after a decision.
 
-The gateway's static admin console uses guarded admin endpoints. Optional OIDC
-integrates with a configured identity provider. Telemetry delivery is best effort;
+The gateway's static admin console uses guarded admin endpoints. `/admin/validate`,
+`/admin/activate` and `/admin/shadow` read a candidate configuration from a path in
+the request body, so that path is confined: it is canonicalized and must resolve
+inside the staging directory, the directory holding the configuration the process
+booted from, or a root named explicitly in `server.admin_config_roots` (empty by
+default). Containment is decided on the resolved target, so a `..` segment or a
+symlink pointing out of a root is refused before the file is opened. Failures
+answer with a stable reason — `outside_allowed_path`, `not_readable`,
+`invalid_yaml`, `schema_invalid`, `config_rejected` — and a message built from
+Cerberus's own schema, never from the candidate's contents; full detail is logged.
+Optional OIDC integrates with a configured identity provider. Telemetry delivery is best effort;
 delivery failures do not turn successful inference into a failure. Config activation
 is persisted atomically and restart restores the active revision. The rollback stack
 is process-local, so restart does not recreate prior rollback depth.

@@ -39,6 +39,13 @@ class ServerConfig(BaseModel):
     # /docs and /openapi.json enumerate the whole admin surface, so they follow the
     # admin boundary by default. Opt out only in development.
     public_docs: bool = False
+    # Additional directories /admin/validate, /admin/activate and /admin/shadow
+    # may read a candidate configuration from. The staging directory and the
+    # directory holding the active configuration are always allowed; this is for
+    # a deployment that authors revisions somewhere else. Explicit configuration
+    # only — never discovered — and empty by default, so the boundary does not
+    # widen unless an operator says so.
+    admin_config_roots: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_credential_separation(self) -> "ServerConfig":
