@@ -1,14 +1,9 @@
-# Cerberus 0.01
+# Cerberus 0.2.0
 
 Cerberus is an AI service router with stable logical addressing over changing
 providers, models and composed inference paths. Its OpenAI-compatible API exposes
 policy-bearing aliases for dedicated services and Fusion routes; clients bind to
 those aliases without depending on provider topology.
-
-The public product version is **0.01**. Python packaging normalizes `0.01` to
-`0.1` in distribution metadata and filenames; release names and this product's
-version declaration remain `0.01`.
-See [Python version normalization](https://packaging.python.org/en/latest/specifications/version-specifiers/#integer-normalization).
 
 ## Development
 
@@ -96,8 +91,7 @@ and [security](SECURITY.md).
 
 ## Release status
 
-This is a prepared 0.01 public-release candidate, not a production-readiness
-claim. Publication requires operator review of the final sanitized-history and
+This is the 0.2.0 release, not a production-readiness claim. Publication requires operator review of the final sanitized-history and
 validation/provenance report. Host deployment records, production identities,
 secret files and incident runbooks belong outside this product repository.
 
