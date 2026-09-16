@@ -88,7 +88,7 @@ async def test_rate_limit_fails_over_in_declared_order_and_cools_down(monkeypatc
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post("/v1/chat/completions", json={"model": "cerberus/main", "messages": []})
-            health = await client.get("/health")
+            health = await client.get("/admin/health")  # cooldowns are admin-only diagnostics
 
     assert response.status_code == 200
     meta = response.json()["cerberus"]
@@ -197,7 +197,7 @@ async def test_models_endpoint_lists_aliases(monkeypatch):
 @pytest.mark.asyncio
 async def test_health_reports_version_and_checksumless_state(monkeypatch):
     app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(lambda _r: httpx.Response(200)))
-    response = await call(app, "GET", "/health")
+    response = await call(app, "GET", "/admin/health")
 
     payload = response.json()
     assert payload["status"] == "ok" and payload["service"] == "cerberus"
@@ -368,3 +368,31 @@ async def test_configured_models_route_without_a_catalog(monkeypatch, model_id, 
     else:
         assert response.json()["usage"] == usage
         assert response.json()["cerberus"]["model"] == model_id
+
+
+@pytest.mark.asyncio
+async def test_cooldown_topology_is_never_public(monkeypatch):
+    """The cooldown snapshot names provider, credential and model for every
+    cooled target. That is routing topology, and /health has no gate at all, so
+    it must not appear there even while a cooldown is active."""
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "alpha.example":
+            return httpx.Response(429, headers={"retry-after": "10"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "fallback"}}]})
+
+    app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.post("/v1/chat/completions", json={"model": "cerberus/main", "messages": []})
+            public = await client.get("/health")
+            admin = await client.get("/admin/health")
+
+    # precondition: a cooldown really is active, so this is not a vacuous check
+    assert admin.json()["cooldowns"], "expected the 429 to have cooled alpha down"
+    assert admin.json()["cooldowns"][0]["provider"] == "alpha"
+
+    assert public.json() == {"status": "ok", "service": "cerberus"}
+    for leaked in ("alpha", "beta", "alpha-free", "quota_429", "cerberus-2026-07-16.1"):
+        assert leaked not in public.text, f"public /health leaked {leaked!r}"

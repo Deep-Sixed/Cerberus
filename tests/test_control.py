@@ -96,10 +96,10 @@ async def test_activate_swaps_atomically_and_rollback_restores(env, tmp_path):
             await client.post("/v1/chat/completions", json=body)
             activated = await client.post("/admin/activate", json={"path": v2}, headers=CSRF)
             await client.post("/v1/chat/completions", json=body)
-            health_after_activate = await client.get("/health")
+            health_after_activate = await client.get("/admin/health")
             rolled = await client.post("/admin/rollback", headers=CSRF)
             await client.post("/v1/chat/completions", json=body)
-            health_after_rollback = await client.get("/health")
+            health_after_rollback = await client.get("/admin/health")
 
     assert activated.json()["active_version"] == "cerberus-2026-07-16.2"
     assert rolled.json()["active_version"] == "cerberus-2026-07-16.1"

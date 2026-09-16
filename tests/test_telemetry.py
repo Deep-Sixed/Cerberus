@@ -280,7 +280,7 @@ async def test_http_auth_failure_degrades_telemetry_without_failing_liveness(
                     json={"model": "cerberus/controlled", "messages": []},
                 )
                 for _ in range(20):
-                    health = await client.get("/health")
+                    health = await client.get("/admin/health")
                     if health.json()["telemetry"]["status"] == "degraded":
                         break
                     await asyncio.sleep(0)
@@ -522,7 +522,7 @@ async def test_event_config_version_binds_to_decision_time_config(monkeypatch, t
         transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 40001))
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post("/v1/chat/completions", json={"model": "cerberus/free", "messages": []})
-            health = await client.get("/health")
+            health = await client.get("/admin/health")
             events = await client.get("/admin/events")
 
     assert response.status_code == 200

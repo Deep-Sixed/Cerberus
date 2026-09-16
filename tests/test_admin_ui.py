@@ -23,7 +23,7 @@ CSRF = {"x-cerberus-csrf": "1"}
 
 # every URL the console is allowed to touch (all GET), and its own assets
 DASHBOARD_DATA_URLS = {
-    "/health", "/admin/status", "/admin/config/active", "/admin/config/schema",
+    "/admin/health", "/admin/status", "/admin/config/active", "/admin/config/schema",
     "/admin/events", "/admin/providers",
 }
 DASHBOARD_ASSET_URLS = {"/admin/ui", "/admin/ui/app.css", "/admin/ui/app.js"}
@@ -282,7 +282,7 @@ async def test_admin_status_reports_release_and_fusion_distinct_from_checksum(mo
     async with app.router.lifespan_context(app):
         async with client_for(app, LOOPBACK) as local:
             status = (await local.get("/admin/status")).json()
-            health = (await local.get("/health")).json()
+            health = (await local.get("/admin/health")).json()
             script = (await local.get("/admin/ui/app.js")).text
 
     assert status["release_id"], "release_id must be exposed and nonempty"
@@ -399,3 +399,75 @@ async def test_every_mutation_endpoint_requires_csrf_even_from_loopback(monkeypa
                 resp = await local.post(url, json={})
                 assert resp.status_code == 403, (url, resp.status_code)
                 assert "csrf" in resp.json()["error"]["message"].lower(), (url, resp.json())
+
+
+# -- public liveness vs protected diagnostics (PR #9) ----------------------
+# /health is the one endpoint with no gate at all. It used to answer an
+# anonymous caller with the active config version and checksum, the
+# control-plane revision, telemetry delivery health and the cooldown snapshot -
+# and that snapshot names provider, credential and model for every cooled
+# target, which is the routing topology.
+
+DIAGNOSTIC_KEYS = {"config_version", "config_checksum", "control_plane", "cooldowns", "telemetry", "routing"}
+
+
+@pytest.mark.asyncio
+async def test_public_health_is_liveness_only(monkeypatch, tmp_path):
+    """Unauthenticated, from a remote peer: liveness and nothing else."""
+
+    app = make_app(monkeypatch, tmp_path)
+    response = await fetch(app, "/health", client_addr=REMOTE)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload == {"status": "ok", "service": "cerberus"}
+    assert not DIAGNOSTIC_KEYS & set(payload)
+
+
+@pytest.mark.asyncio
+async def test_public_health_still_satisfies_the_container_probe(monkeypatch, tmp_path):
+    """scripts/smoke-container.sh and the Compose healthcheck assert status == 'ok'."""
+
+    app = make_app(monkeypatch, tmp_path)
+    assert (await fetch(app, "/health", client_addr=REMOTE)).json()["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_admin_health_refuses_an_unauthenticated_remote_peer(monkeypatch, tmp_path):
+    """The diagnostics follow the same boundary as the rest of the admin surface."""
+
+    app = make_app(monkeypatch, tmp_path)
+    async with app.router.lifespan_context(app):
+        async with client_for(app, REMOTE) as remote:
+            refused = await remote.get("/admin/health")
+            # the neighbouring read-only admin endpoint answers identically
+            providers = await remote.get("/admin/providers")
+
+    assert refused.status_code == 403  # loopback-only, no admin token configured here
+    assert refused.status_code == providers.status_code
+
+
+@pytest.mark.asyncio
+async def test_admin_health_serves_diagnostics_to_an_authorized_caller(monkeypatch, tmp_path):
+    """Nothing is lost: an admin still sees everything /health used to carry."""
+
+    # a non-loopback bind requires an api token too; the two must hold distinct
+    # values, and only the admin one may authorize this endpoint
+    app = make_app(monkeypatch, tmp_path, token="api-token-value", admin_token="admin-token-value")
+    async with app.router.lifespan_context(app):
+        async with client_for(app, REMOTE) as remote:
+            unauthorized = await remote.get("/admin/health")
+            # the inference token must not unlock the admin surface
+            with_api_token = await remote.get(
+                "/admin/health", headers={"authorization": "Bearer api-token-value"}
+            )
+            authorized = await remote.get(
+                "/admin/health", headers={"authorization": "Bearer admin-token-value"}
+            )
+
+    assert unauthorized.status_code == 401
+    assert with_api_token.status_code == 401
+    assert authorized.status_code == 200
+    payload = authorized.json()
+    assert DIAGNOSTIC_KEYS <= set(payload)
+    assert payload["status"] == "ok"

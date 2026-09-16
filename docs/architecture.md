@@ -43,6 +43,14 @@ per-request failures are excluded at their own scope by the cooldown store.
 Normal label lookup reads the in-memory snapshot and performs no SQL.
 Routing and usage records are written asynchronously after a decision.
 
+`/health` is the only ungated endpoint and answers liveness only —
+`{"status": "ok", "service": "cerberus"}` — which is what a container or
+orchestrator probe needs. Operational diagnostics (config version and checksum,
+control-plane revision, telemetry delivery health, the cooldown snapshot) live at
+`/admin/health`, behind the same read-only admin boundary as `/admin/status` and
+`/admin/providers`: the cooldown snapshot names provider, credential and model
+for every cooled target, so it is routing topology and never anonymous.
+
 The gateway's static admin console uses guarded admin endpoints. `/admin/validate`,
 `/admin/activate` and `/admin/shadow` read a candidate configuration from a path in
 the request body, so that path is confined: it is canonicalized and must resolve
@@ -51,8 +59,11 @@ booted from, or a root named explicitly in `server.admin_config_roots` (empty by
 default). Containment is decided on the resolved target, so a `..` segment or a
 symlink pointing out of a root is refused before the file is opened. Failures
 answer with a stable reason — `outside_allowed_path`, `not_readable`,
-`invalid_yaml`, `schema_invalid`, `config_rejected` — and a message built from
-Cerberus's own schema, never from the candidate's contents; full detail is logged.
+`invalid_yaml`, `schema_invalid`, `config_rejected`. The durable invariant is
+that no raw source text, parser excerpt, pydantic `input_value` or file content
+reaches the caller; candidate-derived identifiers and configured paths may still
+appear inside Cerberus-generated policy messages, which is what makes a failure
+actionable. Full detail is logged.
 Optional OIDC integrates with a configured identity provider. Telemetry delivery is best effort;
 delivery failures do not turn successful inference into a failure. Config activation
 is persisted atomically and restart restores the active revision. The rollback stack

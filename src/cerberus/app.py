@@ -273,8 +273,9 @@ def create_app(
             return RedirectResponse(url="/admin/ui" if session is not None else "/admin/login")
         return RedirectResponse(url="/docs")
 
-    @app.get("/health")
-    async def health() -> dict[str, Any]:
+    def diagnostics_snapshot() -> dict[str, Any]:
+        """The full operational picture — admin-only; see /admin/health."""
+
         active = lifecycle.active
         return {
             "status": "ok",
@@ -286,6 +287,26 @@ def create_app(
             "control_plane": control_plane.status() if control_plane is not None else {"storage": "memory"},
             "cooldowns": store.snapshot(),
         }
+
+    @app.get("/health")
+    async def health() -> dict[str, Any]:
+        """Unauthenticated liveness only.
+
+        This is the one endpoint with no gate at all, so it must carry nothing an
+        anonymous caller should not have. It used to answer with the active
+        config version and checksum, the control-plane revision, telemetry
+        delivery health and the cooldown snapshot — and the cooldown snapshot
+        names provider, credential and model for every cooled target, which is
+        the routing topology. Every other informational endpoint (/admin/status,
+        /admin/providers, /v1/models) already refused an unauthenticated peer;
+        this one answered in full. The diagnostics moved to /admin/health, behind
+        the same read-only admin boundary as the rest of that surface.
+
+        Container and orchestrator probes only need liveness: both the Compose
+        healthcheck and scripts/smoke-container.sh assert status == "ok".
+        """
+
+        return {"status": "ok", "service": "cerberus"}
 
     # -- admin surface (control plane) ------------------------------------
 
@@ -456,6 +477,19 @@ def create_app(
             # endpoint never probes the backend.
             "fusion": fusion_status(boot_config),
         }
+
+    @app.get("/admin/health", response_model=None)
+    async def admin_health(request: Request) -> dict[str, Any] | JSONResponse:
+        """Operational diagnostics: config identity, control-plane revision,
+        telemetry delivery health and the cooldown snapshot. Read-only admin,
+        the same boundary as /admin/status and /admin/providers — the cooldown
+        snapshot alone names provider, credential and model for every cooled
+        target, so it is routing topology and never anonymous."""
+
+        denied = await admin_gate(request, read_only=True)
+        if denied is not None:
+            return denied
+        return diagnostics_snapshot()
 
     @app.get("/admin/config/active", response_model=None)
     async def admin_config_active(request: Request) -> dict[str, Any] | JSONResponse:
