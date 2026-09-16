@@ -36,6 +36,17 @@ dev = [
   "hatchling>=1.27,<2",
 ]
 
+[tool.uv]
+# Pin the interpreter SOURCE, not just its version. `requires-python` fixes 3.14.5,
+# but uv's default preference accepts whichever 3.14.5 is already present: a
+# uv-managed install where one exists, otherwise a system one (in CI, the
+# interpreter actions/setup-python puts in the hosted tool cache). Those are
+# different builds with different bundled libraries - notably SQLite, where the
+# managed build shipped 3.53.1 while CI's shipped 3.45.1. That divergence let a
+# test pass locally and fail in CI on ALTER TABLE ... DROP COLUMN semantics.
+# "only-managed" makes both sides resolve the same build from one declaration.
+python-preference = "only-managed"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
