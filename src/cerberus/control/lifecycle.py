@@ -19,6 +19,7 @@ class ControlRepository(Protocol):
     def revision_checksums(self) -> dict[str, str]: ...
     def register(self, document: ConfigDocument) -> None: ...
     def activate(self, document: ConfigDocument, *, action: str = "activate") -> None: ...
+    def operator_activated(self) -> bool: ...
 
 
 class ConfigLifecycle:
@@ -78,6 +79,22 @@ class ConfigLifecycle:
         self._shadow = self.validate(path)
         return self._shadow
 
+    def _operator_activated(self) -> bool:
+        """Whether a revision was activated by an operator rather than seeded at boot.
+
+        Cerberus always boots with an active revision, so "is a revision active"
+        cannot by itself distinguish a gateway an operator has taken charge of
+        from one still running the configuration it started with. Backed by a
+        repository the answer is the persisted audit trail and survives restart.
+        Without one (``state.path`` unset — tests and dry runs) nothing persists
+        at all, so the only truthful answer is this process's own activation
+        history; a rollback that empties it reads as not-yet-activated again.
+        """
+
+        if self._repository is not None:
+            return self._repository.operator_activated()
+        return bool(self._history)
+
     def status(self) -> dict:
         return {
             "active": {
@@ -94,6 +111,7 @@ class ConfigLifecycle:
                 if self._shadow is not None
                 else None
             ),
+            "operator_activated": self._operator_activated(),
             "rollback_depth": len(self._history),
             "storage": "sqlite" if self._repository is not None else "memory",
         }

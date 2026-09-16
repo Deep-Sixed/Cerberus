@@ -520,6 +520,21 @@ def create_app(
         updates = body.get("updates") if isinstance(body, dict) else None
         if not isinstance(updates, dict):
             return JSONResponse(status_code=400, content={"error": {"message": "updates object is required"}})
+        if not updates:
+            # apply_updates only bumps the version when something changed, so an
+            # empty edit would stage a re-serialized copy of the active document
+            # under its own version — a candidate /admin/validate must then
+            # refuse, because that version is already bound to another checksum.
+            # Nothing to stage is not a candidate; the active revision is
+            # validated and activated directly by its own path.
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "staged": False,
+                    "reason": "no_changes",
+                    "error": "No changes to stage; validate and activate the active revision by its own path.",
+                },
+            )
         try:
             candidate = apply_updates(lifecycle.active.config, updates)
         except ValueError as exc:

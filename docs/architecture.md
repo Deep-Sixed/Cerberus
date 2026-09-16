@@ -64,6 +64,26 @@ that no raw source text, parser excerpt, pydantic `input_value` or file content
 reaches the caller; candidate-derived identifiers and configured paths may still
 appear inside Cerberus-generated policy messages, which is what makes a failure
 actionable. Full detail is logged.
+Cerberus always boots with an active revision and routes from it, so "a revision
+is active" cannot distinguish a gateway an operator has taken charge of from one
+still running the configuration it started with. `/admin/status` answers that
+separately with `operator_activated`, derived from the audit trail activation
+already writes — seeding an empty control plane records `bootstrap`, an explicit
+activation records `activate`. It is a read of persisted state, not a new column
+and not a flag held in memory, so it survives restart. Without a control-plane
+database (`state.path` unset) nothing persists and the answer is necessarily
+process-local. The console derives its first-run experience from that field and
+from the event ring, never from a stored lifecycle flag: first run is about
+establishing the first operator-managed revision, not about a gateway that
+cannot serve.
+
+Staging is for edits. `apply_updates` bumps the version only when something
+changed, so staging an empty edit would write a re-serialized copy of the active
+document under its own version — a candidate `/admin/validate` must then refuse,
+because that version is permanently bound to its first checksum. `/admin/config/stage`
+answers `409 no_changes` instead; an unchanged configuration is validated and
+activated by its own path.
+
 Optional OIDC integrates with a configured identity provider. Telemetry delivery is best effort;
 delivery failures do not turn successful inference into a failure. Config activation
 is persisted atomically and restart restores the active revision. The rollback stack
