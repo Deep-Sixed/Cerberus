@@ -29,6 +29,12 @@ from pydantic import ValidationError
 from cerberus import __version__
 from cerberus.control import ConfigLifecycle, SqliteControlPlane
 from cerberus.control.admin_fields import apply_updates, build_schema, stage
+from cerberus.control.candidates import (
+    CandidateRejected,
+    allowed_roots,
+    describe_failure,
+    resolve_candidate,
+)
 from cerberus.identity import (
     AuthentikVerifier,
     IdentityContext,
@@ -152,6 +158,17 @@ def create_app(
     # tests/dry-runs (state.path=None) working without touching disk state
     admin_staging_dir = (
         str(Path(state_path).parent / "staging") if state_path else str(Path(tempfile.gettempdir()) / "cerberus-admin-staging")
+    )
+    # Where a candidate configuration may be read from. Fixed at boot like the
+    # other trust anchors: a config activation must not be able to widen the set
+    # of directories the next activation may read from.
+    candidate_roots = allowed_roots(
+        staging_dir=admin_staging_dir,
+        # the file this process was pointed at, not lifecycle.active.source_path:
+        # after a restore the active revision is rebuilt from SQLite and its
+        # recorded path may name a directory this deployment no longer authors in
+        boot_config_path=document.source_path,
+        extra_roots=boot_config.server.admin_config_roots,
     )
     telemetry = TelemetryEmitter(
         boot_config.telemetry,
@@ -414,6 +431,18 @@ def create_app(
             return None, JSONResponse(status_code=400, content={"error": {"message": "path must be a string"}})
         return path, None
 
+    def candidate_failure(key: str, exc: Exception) -> JSONResponse:
+        """One 422 shape for every candidate refusal: a stable reason plus a
+        message that never carries file content. Detail is logged, not returned."""
+
+        reason, message = describe_failure(exc)
+        return JSONResponse(status_code=422, content={key: False, "reason": reason, "error": message})
+
+    def confined(path: str) -> str:
+        """Canonicalize and require containment before the file is opened."""
+
+        return str(resolve_candidate(path, candidate_roots))
+
     @app.get("/admin/status", response_model=None)
     async def admin_status(request: Request) -> dict[str, Any] | JSONResponse:
         denied = await admin_gate(request, read_only=True)
@@ -478,9 +507,9 @@ def create_app(
         if error is not None or path is None:
             return error or JSONResponse(status_code=400, content={"error": {"message": "path is required"}})
         try:
-            candidate = lifecycle.validate(path)
-        except (ValidationError, RuntimeError, OSError, ValueError, yaml.YAMLError) as exc:
-            return JSONResponse(status_code=422, content={"valid": False, "error": str(exc)})
+            candidate = lifecycle.validate(confined(path))
+        except (CandidateRejected, ValidationError, RuntimeError, OSError, ValueError, yaml.YAMLError) as exc:
+            return candidate_failure("valid", exc)
         return JSONResponse(content={"valid": True, "version": candidate.version, "checksum": candidate.checksum})
 
     @app.post("/admin/activate")
@@ -495,9 +524,9 @@ def create_app(
         if error is not None or path is None:
             return error or JSONResponse(status_code=400, content={"error": {"message": "path is required"}})
         try:
-            activated = lifecycle.activate(path)
-        except (ValidationError, RuntimeError, OSError, ValueError, yaml.YAMLError) as exc:
-            return JSONResponse(status_code=422, content={"activated": False, "error": str(exc)})
+            activated = lifecycle.activate(confined(path))
+        except (CandidateRejected, ValidationError, RuntimeError, OSError, ValueError, yaml.YAMLError) as exc:
+            return candidate_failure("activated", exc)
         return JSONResponse(content={"activated": True, "active_version": activated.version})
 
     @app.post("/admin/rollback")
@@ -526,9 +555,11 @@ def create_app(
         if error is not None:
             return error
         try:
-            shadow = lifecycle.arm_shadow(path)
-        except (ValidationError, RuntimeError, OSError, ValueError, yaml.YAMLError) as exc:
-            return JSONResponse(status_code=422, content={"armed": False, "error": str(exc)})
+            # path=None clears the shadow slot and reads nothing, so it is not
+            # subject to containment
+            shadow = lifecycle.arm_shadow(confined(path) if path is not None else None)
+        except (CandidateRejected, ValidationError, RuntimeError, OSError, ValueError, yaml.YAMLError) as exc:
+            return candidate_failure("armed", exc)
         return JSONResponse(content={"shadow_version": shadow.version if shadow else None})
 
     @app.get("/admin/events", include_in_schema=False, response_model=None)
