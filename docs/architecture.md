@@ -69,6 +69,6 @@ delivery failures do not turn successful inference into a failure. Config activa
 is persisted atomically and restart restores the active revision. The rollback stack
 is process-local, so restart does not recreate prior rollback depth.
 
-For 0.01, deploy one gateway process per routing domain. The SQLite session store
+For 0.2.0, deploy one gateway process per routing domain. The SQLite session store
 supports shared sessions on one host, but this does not make policy activation or
 cooldown updates safe for a multi-process or multi-host gateway deployment.

@@ -1,7 +1,7 @@
 name: cerberus
 services:
   cerberus-api:
-    image: cerberus:0.01
+    image: cerberus:0.2.0
     build:
       context: ../..
       dockerfile: Containerfile
@@ -9,7 +9,7 @@ services:
     ports: ["127.0.0.1:4000:4101"]
     environment:
       CERBERUS_CONFIG: /etc/cerberus/config.yaml
-      CERBERUS_RELEASE_ID: cerberus-0.01
+      CERBERUS_RELEASE_ID: cerberus-0.2.0
       CERBERUS_API_TOKEN: ${CERBERUS_API_TOKEN:?Set CERBERUS_API_TOKEN}
       CERBERUS_ADMIN_TOKEN: ${CERBERUS_ADMIN_TOKEN:?Set CERBERUS_ADMIN_TOKEN}
       CB_KEY_DEV: ${CB_KEY_DEV:?Set CB_KEY_DEV}
