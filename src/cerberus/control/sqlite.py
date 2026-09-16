@@ -376,6 +376,22 @@ class SqliteControlPlane:
             ).fetchone()
         return {"storage": "sqlite", **(dict(row) if row is not None else {})}
 
+    def operator_activated(self) -> bool:
+        """Has an operator ever activated a revision, as opposed to the boot seed?
+
+        Derived from the audit trail ``activate()`` already writes: seeding an
+        empty database records action ``bootstrap``, every explicit activation
+        records ``activate``. No extra column, no schema migration and no
+        lifecycle flag held in memory — the distinction the console needs is
+        already persisted, and it survives restart because this table does.
+        """
+
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM audit_records WHERE action = 'activate' LIMIT 1"
+            ).fetchone()
+        return row is not None
+
     def provider_available(self, provider: str, *, now: float | None = None) -> bool:
         """Health may exclude a configured provider; it can never add one.
 

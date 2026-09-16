@@ -471,3 +471,52 @@ async def test_admin_health_serves_diagnostics_to_an_authorized_caller(monkeypat
     payload = authorized.json()
     assert DIAGNOSTIC_KEYS <= set(payload)
     assert payload["status"] == "ok"
+
+
+# -- frozen console shell (PR #12) -------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_shell_carries_the_frozen_header_navigation_and_candidate_bar(monkeypatch, tmp_path):
+    """The shell's structural anchors: the revision/checksum/routable header,
+    the navigation container, and the candidate action bar whose discard
+    control is styled as destructive."""
+
+    app = make_app(monkeypatch, tmp_path)
+    page = (await fetch(app, "/admin/ui")).text
+
+    for anchor in (
+        'id="revisionLabel"', 'id="revisionValue"', 'id="revisionChecksum"',
+        'id="gatewayValue"', 'id="routableValue"', 'id="telemetryValue"',
+        'id="navlist"', 'id="bringup"', 'id="candidateBar"',
+    ):
+        assert anchor in page, f"missing shell anchor: {anchor}"
+
+    discard = re.search(r'<button[^>]*id="discardButton"[^>]*>', page)
+    assert discard is not None, "the candidate bar must offer a discard control"
+    assert "destructive-button" in discard.group(0), "discarding a candidate must read as destructive"
+    assert "Discard candidate" in page
+
+
+@pytest.mark.asyncio
+async def test_console_state_is_derived_from_operator_activation_and_the_event_ring(monkeypatch, tmp_path):
+    """First run is not a stored lifecycle flag: the script reads
+    operator_activated from /admin/status and the event ring from /admin/events."""
+
+    app = make_app(monkeypatch, tmp_path)
+    script = (await fetch(app, "/admin/ui/app.js")).text
+    assert "operator_activated" in script
+    # and the API really does supply it
+    status = (await fetch(app, "/admin/status")).json()
+    assert "operator_activated" in status
+
+
+@pytest.mark.asyncio
+async def test_deferred_surfaces_are_named_not_faked(monkeypatch, tmp_path):
+    """Route topology and audit history are later work packages. The shell
+    reserves their place and says so rather than rendering invented data."""
+
+    app = make_app(monkeypatch, tmp_path)
+    script = (await fetch(app, "/admin/ui/app.js")).text
+    assert "work package #13" in script, "the routes view must name the work package that fills it"
+    assert "no read-only audit endpoint" in script.lower()
