@@ -5,7 +5,7 @@ configuration in public issues. Report a vulnerability through this repository's
 GitHub private vulnerability reporting facility when enabled. If it is unavailable,
 open a details-free issue requesting a private contact channel before sharing
 sensitive details. No response-time or supported-version guarantee is established
-for the 0.2.0 release.
+for the 0.3.0 release.
 
 Expose only the Cerberus API, behind an appropriate TLS endpoint. Configure
 caller identities and admin authorization explicitly. Mount credentials from a
