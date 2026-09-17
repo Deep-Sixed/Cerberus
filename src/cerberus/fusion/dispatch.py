@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import time
 import uuid
+from collections.abc import Collection
 from datetime import datetime, timezone
 from typing import Any
 
@@ -44,6 +45,37 @@ def fusion_status(config: CerberusConfig) -> dict[str, Any]:
         "state": "configured" if aliases and len(ready) == len(aliases) else "not_configured",
         "backends": backends,
         "aliases": aliases,
+    }
+
+
+def fusion_readiness(
+    config: CerberusConfig,
+    alias: Alias,
+    *,
+    backend_names: Collection[str],
+    control_plane: Any | None,
+) -> dict[str, bool]:
+    """Whether this fusion alias could deliberate right now, by its own gates.
+
+    Fusion does not run its panel through the failover loop: it resolves one
+    backend, one credential and one provider, then sends a single deliberation
+    request. Those three gates are the whole of its availability, and
+    ``fusion_dispatch`` refuses with 503 when any fails. ``/admin/routes``
+    reports the same three from here, so the console cannot claim a readiness
+    the dispatch path would not honour.
+    """
+
+    assert alias.fusion is not None
+    policy = alias.fusion
+    _, api_key = _credential_for(config, alias)
+    backend_present = policy.backend in backend_names
+    credential_present = bool(api_key)
+    provider_available = control_plane is None or control_plane.provider_available(policy.judge.provider)
+    return {
+        "backend_present": backend_present,
+        "credential_present": credential_present,
+        "provider_available": provider_available,
+        "available": backend_present and credential_present and provider_available,
     }
 
 
@@ -126,8 +158,10 @@ async def fusion_dispatch(
 
     backend = backends.get(policy.backend)
     base_url, api_key = _credential_for(document.config, alias)
-    provider_available = control_plane is None or control_plane.provider_available(judge.provider)
-    if backend is None or not api_key or not provider_available:
+    readiness = fusion_readiness(
+        document.config, alias, backend_names=backends.keys(), control_plane=control_plane
+    )
+    if not readiness["available"]:
         emit(outcome="fusion_unavailable", http_status=503, attempts=[], usage=None)
         return error(503, "Fusion backend not configured")
 

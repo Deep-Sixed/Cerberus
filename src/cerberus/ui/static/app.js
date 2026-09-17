@@ -1,4 +1,4 @@
-/* Cerberus console — the frozen console shell (PR #12).
+/* Cerberus console — the frozen console shell.
 
    All data enters the DOM via textContent/createElement (never innerHTML).
    Reads are plain same-origin GETs through getJSON(url). The only writes are
@@ -8,11 +8,14 @@
    or server bindings — the backend enforces that boundary).
 
    Console state is derived, never stored as a lifecycle flag: `operator_activated`
-   from /admin/status answers "has an operator taken charge of a revision", and
-   the /admin/events ring answers "has anything been routed since boot". Cerberus
-   always boots with an active revision and routes from it, so the first-run
-   experience is about establishing the first operator-managed revision — not
-   about a gateway that cannot serve. */
+   from /admin/status answers "has an operator taken charge of a revision".
+   Cerberus always boots with an active revision and routes from it, so the
+   first-run experience is about establishing the first operator-managed
+   revision — not about a gateway that cannot serve.
+
+   Route state is not derived here at all. Eligibility, policy exclusion, health,
+   cooldown and the fusion chain are routing decisions, so they arrive already
+   decided from /admin/routes; this file labels them and never re-derives one. */
 "use strict";
 
 const ENDPOINTS = {
@@ -23,6 +26,11 @@ const ENDPOINTS = {
   schema: "/admin/config/schema",
   events: "/admin/events",
   providers: "/admin/providers",
+  // every route state on the Routes screen comes from here already decided:
+  // eligibility, policy exclusion, health, cooldown and the fusion chain are
+  // routing decisions, and a browser that re-derived them would be a second
+  // router free to disagree with the real one
+  routes: "/admin/routes",
   stage: "/admin/config/stage",
   validate: "/admin/validate",
   activate: "/admin/activate",
@@ -91,7 +99,9 @@ function basename(path) {
 
 // ---- state ----
 
-let STATE = { health: {}, status: {}, config: {}, schema: {}, events: [], providers: [] };
+let STATE = { health: {}, status: {}, config: {}, schema: {}, events: [], providers: [], routes: {} };
+// which route path the inspector is describing; never a routing decision
+let SELECTION = { alias: null, ordinal: null };
 let VIEW = "health";
 // the candidate loop's own progress — not a lifecycle flag, just what this
 // console session has done to the candidate it is looking at
@@ -108,35 +118,35 @@ const NAV = [
 
 const VIEW_CHROME = {
   aliases: ["Aliases", "Stable addresses callers bind to — policy, pinned path, eligibility.", "GET /admin/config/active"],
-  routes: ["Routes", "Why a request lands where it lands: alias, identity policy, eligible path, provider.", "GET /admin/config/active · /admin/events"],
+  routes: ["Routes", "Where each alias can go, and why a route path is eligible or unavailable right now.", "GET /admin/routes"],
   fusion: ["Fusion", "Cerberus holds the policy; the backend holds the deliberation.", "GET /admin/status"],
   providers: ["Providers", "Credential presence, cooldown windows, live probe.", "GET /admin/providers"],
   health: ["Health", "Liveness, telemetry delivery and cooldown state behind the admin boundary.", "GET /admin/health"],
   audit: ["Audit", "Revision registrations and activations.", "no endpoint"],
 };
 
-// Two independent facts, never one lifecycle flag: has an operator activated a
-// revision, and does the in-memory ring hold a decision from this boot.
+// Derived, never a stored lifecycle flag. Whether anything has been routed since
+// boot is the other half of the console's state model, but nothing reads it until
+// decision visibility lands, so it is not carried here unused.
 const operatorActivated = () => STATE.status.operator_activated === true;
-const hasDecisions = () => STATE.events.length > 0;
 
 function aliasEntries() {
   return Object.entries(STATE.config.aliases || {});
 }
 
-function configuredProviders() {
-  const map = {};
-  for (const p of STATE.providers) map[p.name] = p.configured;
-  return map;
+// Whether an alias can be routed to right now is a routing decision, so it is
+// read from the projection and never recomputed here. Credential presence was
+// the wrong proxy for it: a provider can hold a valid credential and still be
+// health-excluded, cooled down, or prohibited by cost policy, and a fusion alias
+// can have every credential in place and no reachable backend.
+function aliasRoutable(entry) {
+  if (entry.fusion) return entry.fusion.readiness.available === true;
+  return (entry.paths || []).some((path) => path.state === "eligible" || path.state === "standby");
 }
 
-// An alias is routable when at least one of its candidates names a provider
-// whose credentials are actually present in the environment.
 function routableCount() {
-  const configured = configuredProviders();
-  const aliases = aliasEntries();
-  const routable = aliases.filter(([, a]) => (a.candidates || []).some((c) => configured[c.provider])).length;
-  return { routable, total: aliases.length };
+  const aliases = projectedAliases();
+  return { routable: aliases.filter(aliasRoutable).length, total: aliases.length };
 }
 
 function candidatePathCount() {
@@ -164,12 +174,13 @@ function telemetryState() {
 
 async function refresh() {
   try {
-    const [health, status, config, schema, events, providers] = await Promise.all([
+    const [health, status, config, schema, events, providers, routes] = await Promise.all([
       getJSON(ENDPOINTS.health), getJSON(ENDPOINTS.status), getJSON(ENDPOINTS.config),
       getJSON(ENDPOINTS.schema), getJSON(ENDPOINTS.events), getJSON(ENDPOINTS.providers),
+      getJSON(ENDPOINTS.routes),
     ]);
     STATE = {
-      health, status, config, schema,
+      health, status, config, schema, routes,
       events: events.events || [],
       providers: providers.providers || [],
     };
@@ -216,7 +227,7 @@ function navCount(id) {
   if (!operatorActivated()) return { label: "—", cls: "navcount navcount-dim" };
   if (id === "audit") return { label: "gap", cls: "navcount navcount-gap" };
   if (id === "aliases") return { label: String(aliasEntries().length), cls: "navcount" };
-  if (id === "routes") return { label: String(candidatePathCount()), cls: "navcount" };
+  if (id === "routes") return { label: String(projectedPathCount()), cls: "navcount" };
   if (id === "providers") return { label: String(STATE.providers.length), cls: "navcount" };
   if (id === "fusion") {
     const f = STATE.status.fusion || {};
@@ -235,7 +246,7 @@ function renderNav() {
       "button",
       {
         class: "navitem" + (locked ? " navitem-locked" : "") + (!locked && VIEW === id ? " navitem-on" : ""),
-        attrs: { type: "button", "aria-current": !locked && VIEW === id ? "page" : "false" },
+        attrs: { type: "button", id: "nav-" + id, "aria-current": !locked && VIEW === id ? "page" : "false" },
         props: locked ? { disabled: true } : {},
         onClick: locked ? undefined : () => { VIEW = id; render(); },
       },
@@ -418,15 +429,25 @@ function pending(title, body, gap) {
 }
 
 function viewAliases() {
-  const configured = configuredProviders();
+  // Mode, candidate count and the cost gate are configuration, shown as the
+  // revision writes them. State is not: it is joined to the same projection the
+  // header counts, through the same predicate, so a row can never contradict
+  // the count above it.
+  const projected = {};
+  for (const entry of projectedAliases()) projected[entry.alias] = entry;
+
   const rows = aliasEntries().map(([name, a]) => {
-    const routable = (a.candidates || []).some((c) => configured[c.provider]);
+    const entry = projected[name];
+    const routable = entry !== undefined && aliasRoutable(entry);
     return [
       codeText(name),
       el("span", { class: "pill", text: text(a.mode) }),
       String((a.candidates || []).length),
       a.allow_paid_fallback ? "paid fallback" : "free only",
-      el("span", { class: "pill " + (routable ? "up" : "bad"), text: routable ? "routable" : "missing_credentials" }),
+      // "unavailable", never a named cause: provider health, a cooldown, cost
+      // policy or fusion readiness may each be why, and the console does not
+      // get to guess which
+      el("span", { class: "pill " + (routable ? "up" : "bad"), text: routable ? "routable" : "unavailable" }),
     ];
   });
   return table(["Alias", "Mode", "Candidate paths", "Gate", "State"], rows);
@@ -575,7 +596,7 @@ function renderView() {
   const [title, sub, source] = VIEW_CHROME[VIEW];
   head.hidden = false;
   head.replaceChildren(
-    el("div", null, el("h1", { text: title }), el("p", { text: hasDecisions() || VIEW !== "routes" ? sub : "No routing decisions retained since boot — what follows is configuration, not traffic." })),
+    el("div", null, el("h1", { text: title }), el("p", { text: sub })),
     el("code", { text: source }),
   );
 
@@ -584,8 +605,7 @@ function renderView() {
     fusion: viewFusion,
     providers: viewProviders,
     health: viewHealth,
-    routes: () => pending("Route topology arrives in work package #13",
-      "The route path, its failover ladder and the route inspector are the next work package. This shell reserves their place; nothing is rendered from guesswork."),
+    routes: viewRoutes,
     audit: () => pending("No read-only audit endpoint",
       "Cerberus records revision registrations and activations, but 0.2.0 exposes no endpoint to read them. The screen stays empty until that endpoint exists rather than inventing a history.", true),
   };
@@ -593,14 +613,197 @@ function renderView() {
   if (VIEW === "providers") renderProvidersActions();
 }
 
+
+// ---- routes ----
+
+function projectedAliases() {
+  return (STATE.routes && STATE.routes.aliases) || [];
+}
+
+function projectedPathCount() {
+  return projectedAliases().reduce((n, a) => n + (a.paths ? a.paths.length : 0), 0);
+}
+
+// Presentation only: the server already decided the state and the reason. This
+// turns its vocabulary into the operator's, and invents no verdict of its own.
+const EXCLUSION_LABEL = {
+  paid_fallback_prohibited: ["excluded by policy", "paid fallback prohibited for this alias"],
+  cost_tier_guard: ["excluded by policy", "cost tier guard"],
+  provider_down: ["unavailable", "provider health"],
+  missing_credentials: ["unavailable", "credential not present"],
+};
+
+function describeState(path) {
+  if (path.state === "eligible") return { short: "eligible", note: "first route path the router would attempt", tone: "t-up" };
+  if (path.state === "standby") return { short: "standby", note: "attempted only if an earlier route path fails", tone: "t-mono" };
+  const reason = (path.exclusion && path.exclusion.reason) || "excluded";
+  if (reason.indexOf("cooldown_") === 0) {
+    const scope = path.exclusion.scope ? " · scope " + path.exclusion.scope : "";
+    return { short: "cooldown", note: reason.slice("cooldown_".length).replace(/_/g, " ") + scope + retryNote(path.exclusion.retry_at), tone: "t-warn" };
+  }
+  const label = EXCLUSION_LABEL[reason];
+  return label
+    ? { short: label[0], note: label[1], tone: reason === "provider_down" || reason === "missing_credentials" ? "t-bad" : "t-warn" }
+    : { short: "excluded", note: reason.replace(/_/g, " "), tone: "t-warn" };
+}
+
+function retryNote(retryAt) {
+  if (!retryAt) return "";
+  const seconds = Math.max(0, Math.round(retryAt - Date.now() / 1000));
+  if (seconds < 60) return " · retry in " + seconds + "s";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.round((seconds % 3600) / 60);
+  return " · retry in " + (hours ? hours + "h " + minutes + "m" : minutes + "m");
+}
+
+function selectedAliasEntry() {
+  const aliases = projectedAliases();
+  return aliases.find((a) => a.alias === SELECTION.alias) || aliases[0] || null;
+}
+
+function aliasRail(aliases, current) {
+  return el("div", { class: "alias-rail" }, ...aliases.map((entry, index) => {
+    const on = current && entry.alias === current.alias;
+    const count = entry.paths ? entry.paths.length + " route paths" : entry.fusion.panel.length + " panel members";
+    return el("button", {
+      class: "alias-tab" + (on ? " alias-tab-on" : ""),
+      attrs: { type: "button", id: "alias-tab-" + index, "aria-pressed": on ? "true" : "false" },
+      onClick: () => { SELECTION = { alias: entry.alias, ordinal: null }; render(); },
+    },
+      el("code", { class: "alias-name", text: entry.alias }),
+      el("span", { class: "alias-meta" },
+        el("span", { class: "pill", text: entry.mode === "fusion" ? "Fusion" : "dedicated" }),
+        el("code", { text: count })));
+  }));
+}
+
+function pathRow(entry, path) {
+  const state = describeState(path);
+  const on = SELECTION.alias === entry.alias && SELECTION.ordinal === path.ordinal;
+  return el("button", {
+    class: "path-row" + (on ? " path-row-on" : ""),
+    attrs: { type: "button", id: "path-row-" + path.ordinal, "aria-pressed": on ? "true" : "false" },
+    onClick: () => { SELECTION = { alias: entry.alias, ordinal: path.ordinal }; render(); },
+  },
+    el("code", { class: "path-ord", text: "pref " + path.ordinal }),
+    el("div", { class: "path-main" },
+      el("code", { class: "path-target", text: path.provider + "/" + path.model }),
+      el("span", { class: "path-note", text: state.note })),
+    el("code", { class: "path-cred", text: "cred " + path.credential_ref }),
+    el("code", { class: "path-tier " + (path.cost_tier === "paid" ? "t-warn" : "t-mono"), text: path.cost_tier }),
+    el("code", { class: "path-state " + state.tone, text: state.short }));
+}
+
+function fusionChain(entry) {
+  const f = entry.fusion;
+  const ready = f.readiness;
+  const link = (label, nodes) => el("div", { class: "chain-step" },
+    el("span", { class: "fact-label", text: label }),
+    el("div", { class: "chain-nodes" }, ...nodes));
+  const node = (p) => el("code", { class: "chain-node", text: p.provider + "/" + p.model });
+  return el("div", { class: "stack" },
+    el("p", { class: "chain-intro", text: "Cerberus composes the panel, analyst and outer model, then the backend performs the deliberation as one call. Panel members do not enter the failover loop, so they carry no eligibility or cooldown state." }),
+    el("div", { class: "chain" },
+      link("Panel members", f.panel.map(node)),
+      el("div", { class: "chain-arrow", text: "↓" }),
+      link("Analyst / judge", [node(f.analyst)]),
+      el("div", { class: "chain-arrow", text: "↓" }),
+      link("Outer model", [node(f.outer)])),
+    el("div", { class: "card" },
+      el("h3", { text: "Readiness" }),
+      ...[["backend_present", "backend configured"], ["credential_present", "judge credential present"],
+          ["provider_available", "judge provider available"], ["available", "can deliberate now"]]
+        .map(([k, label]) => el("div", { class: "card-row" },
+          el("span", { text: label }),
+          codeText(ready[k] ? "yes" : "no", ready[k] ? "t-up" : "t-bad")))));
+}
+
+function inspectorRows(entry) {
+  const projection = STATE.routes;
+  const base = [
+    ["active revision", text(projection.revision), "t-ink"],
+    ["checksum", short(projection.checksum), "t-mono"],
+    ["alias", entry.alias, "t-ink"],
+    ["mode", entry.mode, "t-mono"],
+  ];
+  if (entry.fusion) {
+    return base.concat([
+      ["analyst", entry.fusion.analyst.provider + "/" + entry.fusion.analyst.model, "t-ink"],
+      ["outer model", entry.fusion.outer.provider + "/" + entry.fusion.outer.model, "t-ink"],
+      ["credential", entry.fusion.analyst.credential_ref, "t-mono"],
+      ["panel size", String(entry.fusion.panel.length) + " of " + entry.fusion.max_panel_members, "t-mono"],
+      ["paid panel", entry.fusion.allow_paid_panel ? "allowed" : "prohibited", "t-mono"],
+      ["deliberation", entry.fusion.readiness.available ? "ready" : "unavailable",
+       entry.fusion.readiness.available ? "t-up" : "t-bad"],
+    ]);
+  }
+  const path = (entry.paths || []).find((p) => p.ordinal === SELECTION.ordinal);
+  if (!path) return base.concat([["route path", "select a route path", "t-mono"]]);
+  const state = describeState(path);
+  return base.concat([
+    ["route path", "pref " + path.ordinal, "t-ink"],
+    ["provider / model", path.provider + "/" + path.model, "t-ink"],
+    ["credential", path.credential_ref, "t-mono"],
+    ["cost tier", path.cost_tier, path.cost_tier === "paid" ? "t-warn" : "t-mono"],
+    ["paid fallback", entry.allow_paid_fallback ? "allowed" : "prohibited", "t-mono"],
+    ["state", state.short, state.tone],
+    ["reason", path.exclusion ? state.note : "—", path.exclusion ? state.tone : "t-mono"],
+  ]);
+}
+
+function inspector(entry) {
+  const rows = inspectorRows(entry);
+  return el("aside", { class: "inspector", attrs: { id: "inspector", "aria-live": "polite", tabindex: "-1" } },
+    el("span", { class: "fact-label", text: entry.fusion ? "Fusion inspector" : "Route path inspector" }),
+    el("div", { class: "inspect-rows" },
+      ...rows.map(([k, v, tone]) => el("div", { class: "inspect-row" },
+        el("span", { text: k }), codeText(v, tone)))),
+    el("div", { class: "inspect-identities" },
+      el("span", { class: "fact-label", text: "Identity policy" }),
+      ...(entry.identities.length
+        ? entry.identities.map((i) => el("div", { class: "inspect-row" },
+            el("span", { text: i.name }),
+            codeText(i.authorized ? "authorized" : text(i.denial_reason), i.authorized ? "t-up" : "t-bad")))
+        : [el("span", { class: "muted", text: "no identities in revision" })])));
+}
+
+function viewRoutes() {
+  const aliases = projectedAliases();
+  if (!aliases.length) {
+    return pending("No aliases in this revision", "The active revision defines no alias, so there is no route path to show.");
+  }
+  const entry = selectedAliasEntry();
+  const body = entry.fusion
+    ? fusionChain(entry)
+    : el("div", null,
+        el("div", { class: "path-head" },
+          el("span", { text: "Order" }), el("span", { text: "Route path" }),
+          el("span", { text: "Credential" }), el("span", { text: "Cost" }), el("span", { text: "State" })),
+        ...entry.paths.map((p) => pathRow(entry, p)));
+  return el("div", { class: "routes" },
+    el("div", { class: "routes-main" }, aliasRail(aliases, entry), el("div", { class: "routes-body" }, body)),
+    inspector(entry));
+}
+
 // ---- render ----
 
 function render() {
+  // every render replaces whole subtrees, which destroys whatever the keyboard
+  // was on and drops focus to <body>. Selecting a route path must not cost a
+  // keyboard operator their place, so the same control is focused again by id.
+  const focused = document.activeElement;
+  const restore = focused && focused.id && focused !== document.body ? focused.id : null;
+
   renderHeader();
   renderNav();
   renderBringup();
   renderView();
   renderCandidateBar();
+
+  if (restore) {
+    const again = document.getElementById(restore);
+    if (again) again.focus();
+  }
 }
 
 wireCandidateBar();
