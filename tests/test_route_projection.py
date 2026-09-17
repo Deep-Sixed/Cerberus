@@ -405,3 +405,71 @@ async def test_projection_pins_the_active_revision(env, tmp_path):
     assert {entry["alias"] for entry in payload["aliases"]} == {
         "cerberus/mixed", "cerberus/fusion-review"
     }
+
+
+# -- routability is the router's verdict, not credential presence -------------
+
+
+@pytest.mark.asyncio
+async def test_an_alias_with_every_credential_present_can_still_be_unroutable(env, tmp_path):
+    """The console header once counted an alias routable when a candidate's
+    provider held a credential. This alias holds every credential it names and
+    the router would still attempt none of its paths."""
+
+    raw = raw_config(str(tmp_path / "s.sqlite3"))
+    # narrow the alias to alpha only, so excluding alpha excludes the whole alias
+    raw["aliases"]["cerberus/mixed"]["candidates"] = [
+        {"provider": "alpha", "credential": "main", "model": "a-free"},
+        {"provider": "alpha", "credential": "main", "model": "a-second"},
+    ]
+    app = build(tmp_path, raw)
+    async with app.router.lifespan_context(app):
+        async with client_for(app) as client:
+            healthy = alias_of(await projection(client), "cerberus/mixed")
+            assert any(p["state"] in {"eligible", "standby"} for p in healthy["paths"])
+
+            app.state.control_plane.set_provider_health("alpha", "down", ttl_seconds=60)
+            down = alias_of(await projection(client), "cerberus/mixed")
+
+            providers = (await client.get("/admin/providers")).json()["providers"]
+
+    # credentials are all present — the old proxy would have said "routable"
+    assert all(p["configured"] for p in providers if p["name"] == "alpha")
+    assert [p["state"] for p in down["paths"]] == ["excluded", "excluded"]
+    assert not any(p["state"] in {"eligible", "standby"} for p in down["paths"])
+    assert {p["exclusion"]["reason"] for p in down["paths"]} == {"provider_down"}
+
+
+@pytest.mark.asyncio
+async def test_a_cooldown_alone_can_make_an_alias_unroutable(env, tmp_path):
+    raw = raw_config(str(tmp_path / "s.sqlite3"))
+    raw["aliases"]["cerberus/mixed"]["candidates"] = [
+        {"provider": "alpha", "credential": "main", "model": "a-free"},
+    ]
+    app = build(tmp_path, raw)
+    async with app.router.lifespan_context(app):
+        async with client_for(app) as client:
+            app.state.cooldowns.apply(
+                scope="provider", provider="alpha", credential=None, model=None,
+                reason="quota_429", duration_seconds=3600,
+            )
+            entry = alias_of(await projection(client), "cerberus/mixed")
+
+    assert not any(p["state"] in {"eligible", "standby"} for p in entry["paths"])
+    assert entry["paths"][0]["exclusion"]["reason"] == "cooldown_quota_429"
+
+
+@pytest.mark.asyncio
+async def test_fusion_is_unavailable_while_its_credential_is_present(env, tmp_path):
+    """Fusion readiness is not a credential check either: the judge's credential
+    is present and the alias still cannot deliberate."""
+
+    app = build(tmp_path, raw_config(str(tmp_path / "s.sqlite3")))
+    async with app.router.lifespan_context(app):
+        async with client_for(app) as client:
+            app.state.control_plane.set_provider_health("alpha", "down", ttl_seconds=60)
+            readiness = alias_of(await projection(client), "cerberus/fusion-review")["fusion"]["readiness"]
+
+    assert readiness["credential_present"] is True
+    assert readiness["provider_available"] is False
+    assert readiness["available"] is False

@@ -559,3 +559,47 @@ async def test_route_state_comes_only_from_the_projection(monkeypatch, tmp_path)
     # these have no purpose except re-deriving a decision the router already made
     for derivation in ("allowed_aliases", ".allowed_modes.includes", "has_free", "hasFree"):
         assert derivation not in script, f"route state must not be derived client-side: {derivation}"
+
+
+def _function_source(script: str, name: str) -> str:
+    """The code of one top-level function, by brace balance, without its
+    comments — these assertions are about what the function does, and a comment
+    explaining why it no longer reads a field must not read as though it does."""
+
+    start = script.index(f"function {name}(")
+    depth = 0
+    for i in range(script.index("{", start), len(script)):
+        if script[i] == "{":
+            depth += 1
+        elif script[i] == "}":
+            depth -= 1
+            if depth == 0:
+                body = script[start : i + 1]
+                return "\n".join(
+                    line for line in body.splitlines() if not line.strip().startswith("//")
+                )
+    raise AssertionError(f"unterminated function {name}")
+
+
+@pytest.mark.asyncio
+async def test_header_routability_reads_the_projection_not_credential_presence(monkeypatch, tmp_path):
+    """The header's routable count once meant "a candidate's provider holds a
+    credential", which disagrees with the router whenever health, a cooldown,
+    cost policy or a fusion backend is the reason an alias cannot be routed to.
+    It must aggregate the projection's own verdicts and nothing else."""
+
+    app = make_app(monkeypatch, tmp_path)
+    script = (await fetch(app, "/admin/ui/app.js")).text
+    deciding = _function_source(script, "aliasRoutable") + _function_source(script, "routableCount")
+
+    # the verdicts it aggregates
+    assert "readiness.available" in deciding
+    assert 'state === "eligible"' in deciding
+    assert "projectedAliases()" in deciding
+
+    # and nothing it could use to re-derive one
+    for proxy in (
+        "configured", "credential", "cost_tier", "candidates",
+        "STATE.providers", "STATE.config", "allow_paid",
+    ):
+        assert proxy not in deciding, f"routability must not be derived from {proxy}"

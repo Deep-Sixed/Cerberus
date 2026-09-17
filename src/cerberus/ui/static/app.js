@@ -134,19 +134,19 @@ function aliasEntries() {
   return Object.entries(STATE.config.aliases || {});
 }
 
-function configuredProviders() {
-  const map = {};
-  for (const p of STATE.providers) map[p.name] = p.configured;
-  return map;
+// Whether an alias can be routed to right now is a routing decision, so it is
+// read from the projection and never recomputed here. Credential presence was
+// the wrong proxy for it: a provider can hold a valid credential and still be
+// health-excluded, cooled down, or prohibited by cost policy, and a fusion alias
+// can have every credential in place and no reachable backend.
+function aliasRoutable(entry) {
+  if (entry.fusion) return entry.fusion.readiness.available === true;
+  return (entry.paths || []).some((path) => path.state === "eligible" || path.state === "standby");
 }
 
-// An alias is routable when at least one of its candidates names a provider
-// whose credentials are actually present in the environment.
 function routableCount() {
-  const configured = configuredProviders();
-  const aliases = aliasEntries();
-  const routable = aliases.filter(([, a]) => (a.candidates || []).some((c) => configured[c.provider])).length;
-  return { routable, total: aliases.length };
+  const aliases = projectedAliases();
+  return { routable: aliases.filter(aliasRoutable).length, total: aliases.length };
 }
 
 function candidatePathCount() {
@@ -426,6 +426,12 @@ function wireCandidateBar() {
 function pending(title, body, gap) {
   return el("div", { class: "pending" + (gap ? " pending-gap" : "") },
     el("strong", { text: title }), el("p", { text: body }));
+}
+
+function configuredProviders() {
+  const map = {};
+  for (const p of STATE.providers) map[p.name] = p.configured;
+  return map;
 }
 
 function viewAliases() {
