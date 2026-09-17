@@ -101,7 +101,7 @@ function basename(path) {
 
 let STATE = { health: {}, status: {}, config: {}, schema: {}, events: [], providers: [], routes: {} };
 // which route path the inspector is describing; never a routing decision
-let SELECTION = { alias: null, ordinal: null };
+let SELECTION = { alias: null, ordinal: null, decision: null, inspect: "path" };
 let VIEW = "health";
 // the candidate loop's own progress — not a lifecycle flag, just what this
 // console session has done to the candidate it is looking at
@@ -550,6 +550,50 @@ function viewProviders() {
   );
 }
 
+
+/* The delivery lane, labelled only by what /admin/health.telemetry proves.
+
+   The contract carries a status, the last success and error, the last HTTP
+   status, consecutive failures and a dropped-event count. It does not carry a
+   queue depth, a sink URL, a token location or a destination, so none of those
+   are drawn — a lane diagram that named a sink it cannot see would be a
+   decoration asserting a fact. */
+
+const DELIVERY_STATE = {
+  disabled: ["No telemetry sink configured", "t-mono"],
+  pending: ["Configured · awaiting first successful delivery", "t-mono"],
+  healthy: ["Delivery healthy", "t-up"],
+  degraded: ["Delivery degraded", "t-warn"],
+};
+
+function telemetryLane(telemetry) {
+  const status = text(telemetry.status);
+  const described = DELIVERY_STATE[status] || [status, "t-mono"];
+  const rows = [
+    ["status", status, described[1]],
+    ["last successful delivery", text(telemetry.last_success_at || "—"), "t-mono"],
+    ["last delivery error", text(telemetry.last_error || "—"), telemetry.last_error ? "t-bad" : "t-mono"],
+  ];
+  if (telemetry.last_status_code !== null && telemetry.last_status_code !== undefined) {
+    rows.push(["last http status", String(telemetry.last_status_code), "t-warn"]);
+  }
+  rows.push(
+    ["consecutive failures", text(telemetry.consecutive_failures), telemetry.consecutive_failures ? "t-warn" : "t-mono"],
+    ["dropped events", text(telemetry.dropped_events), telemetry.dropped_events ? "t-warn" : "t-mono"],
+  );
+
+  const stage = (label) => el("code", { class: "lane-stage", text: label });
+  return el("div", { class: "card" },
+    el("h3", { text: "Telemetry delivery" }),
+    el("div", { class: "lane" },
+      stage("Routing event"), el("span", { class: "lane-arrow", text: "→" }),
+      stage("Local queue"), el("span", { class: "lane-arrow", text: "→" }),
+      stage("Sink / local store")),
+    el("p", { class: "lane-state " + described[1], text: described[0] }),
+    ...rows.map(([k, v, tone]) => el("div", { class: "card-row" }, el("span", { text: k }), codeText(v, tone))),
+  );
+}
+
 function viewHealth() {
   const h = STATE.health;
   const cooldowns = h.cooldowns || [];
@@ -568,10 +612,7 @@ function viewHealth() {
         el("h3", { text: "Control plane" }),
         ...Object.entries(cp).map(([k, v]) => el("div", { class: "card-row" }, el("span", { text: k }), codeText(typeof v === "object" ? JSON.stringify(v) : v))),
       ),
-      el("div", { class: "card" },
-        el("h3", { text: "Telemetry delivery" }),
-        ...Object.entries(t).map(([k, v]) => el("div", { class: "card-row" }, el("span", { text: k }), codeText(typeof v === "object" ? JSON.stringify(v) : v))),
-      ),
+      telemetryLane(t),
     ),
     el("div", null,
       el("div", { class: "section-title", text: "Cooldowns" }),
@@ -668,7 +709,7 @@ function aliasRail(aliases, current) {
     return el("button", {
       class: "alias-tab" + (on ? " alias-tab-on" : ""),
       attrs: { type: "button", id: "alias-tab-" + index, "aria-pressed": on ? "true" : "false" },
-      onClick: () => { SELECTION = { alias: entry.alias, ordinal: null }; render(); },
+      onClick: () => { SELECTION = { alias: entry.alias, ordinal: null, decision: null, inspect: "path" }; render(); },
     },
       el("code", { class: "alias-name", text: entry.alias }),
       el("span", { class: "alias-meta" },
@@ -683,7 +724,7 @@ function pathRow(entry, path) {
   return el("button", {
     class: "path-row" + (on ? " path-row-on" : ""),
     attrs: { type: "button", id: "path-row-" + path.ordinal, "aria-pressed": on ? "true" : "false" },
-    onClick: () => { SELECTION = { alias: entry.alias, ordinal: path.ordinal }; render(); },
+    onClick: () => { SELECTION = { alias: entry.alias, ordinal: path.ordinal, decision: null, inspect: "path" }; render(); },
   },
     el("code", { class: "path-ord", text: "pref " + path.ordinal }),
     el("div", { class: "path-main" },
@@ -780,9 +821,189 @@ function viewRoutes() {
           el("span", { text: "Order" }), el("span", { text: "Route path" }),
           el("span", { text: "Credential" }), el("span", { text: "Cost" }), el("span", { text: "State" })),
         ...entry.paths.map((p) => pathRow(entry, p)));
+  const selectedDecision = SELECTION.inspect === "decision"
+    ? decisionsFor(entry.alias).find((event) => event.request_id === SELECTION.decision)
+    : null;
   return el("div", { class: "routes" },
-    el("div", { class: "routes-main" }, aliasRail(aliases, entry), el("div", { class: "routes-body" }, body)),
-    inspector(entry));
+    el("div", { class: "routes-main" },
+      aliasRail(aliases, entry),
+      el("div", { class: "routes-body" }, body, recentDecisions(entry))),
+    selectedDecision ? decisionInspector(selectedDecision) : inspector(entry));
+}
+
+
+// ---- decisions ----
+
+/* What actually happened, from the /admin/events ring alone.
+
+   A recorded decision is history and is rendered as recorded: its attempts are
+   the attempts, its exclusions are the exclusions, and its revision and checksum
+   are the ones that were active when it ran — not today's. The current route
+   projection may legitimately disagree with any of it, because a cooldown has
+   since expired, provider health has changed, a revision was activated or a
+   credential appeared. Explaining an old decision with today's state would
+   invent a history the gateway never had.
+
+   The ring is bounded and per-process: a restart empties it. That is
+   active-no-traffic, never a return to onboarding. */
+
+// the ring arrives newest-first from the server; filtered, never re-sorted
+function decisionsFor(aliasName) {
+  return STATE.events.filter((event) => event.alias === aliasName);
+}
+
+const OUTCOME_TONE = {
+  success: "t-up",
+  shadow: "t-mono",
+  unauthorized: "t-warn",
+  stream_interrupted: "t-warn",
+  upstream_error: "t-bad",
+  routing_exhausted: "t-bad",
+  fusion_unavailable: "t-bad",
+};
+
+const ATTEMPT_TONE = {
+  response: "t-up",
+  retryable_status: "t-warn",
+  transport_error: "t-warn",
+  stream_interrupted: "t-warn",
+  missing_credentials: "t-bad",
+  invalid_response: "t-bad",
+};
+
+const outcomeTone = (outcome) => OUTCOME_TONE[outcome] || "t-mono";
+const attemptTone = (outcome) => ATTEMPT_TONE[outcome] || "t-mono";
+
+function clockTime(stamp) {
+  const raw = text(stamp);
+  const at = raw.indexOf("T");
+  return at === -1 ? raw : raw.slice(at + 1, at + 9) + "Z";
+}
+
+// shortened for the row, and the full value stays inspectable
+const shortId = (id) => text(id).slice(0, 8);
+
+function millis(value) {
+  return value === null || value === undefined ? "—" : Math.round(value) + "ms";
+}
+
+function decisionRow(event) {
+  const on = SELECTION.inspect === "decision" && SELECTION.decision === event.request_id;
+  const target = event.provider && event.model ? event.provider + "/" + event.model : "no provider selected";
+  return el("button", {
+    class: "decision-row" + (on ? " decision-row-on" : ""),
+    attrs: {
+      type: "button",
+      id: "decision-row-" + text(event.request_id),
+      title: "request " + text(event.request_id),
+      "aria-pressed": on ? "true" : "false",
+    },
+    onClick: () => {
+      SELECTION = { alias: SELECTION.alias, ordinal: SELECTION.ordinal, decision: event.request_id, inspect: "decision" };
+      render();
+    },
+  },
+    el("code", { class: "decision-time", text: clockTime(event.timestamp) }),
+    el("code", { class: "decision-id", text: shortId(event.request_id) }),
+    el("div", { class: "decision-main" },
+      el("code", { class: "decision-target", text: target }),
+      el("span", { class: "decision-note", text:
+        (event.used_fallback ? "fallback · " : "") +
+        (event.streaming ? "streaming · " : "") +
+        text(event.attempt_count) + (event.attempt_count === 1 ? " attempt" : " attempts") }),
+    ),
+    el("code", { class: "decision-latency", text: millis(event.latency_ms) }),
+    el("code", { class: "decision-status", text: text(event.http_status) }),
+    el("code", { class: "decision-outcome " + outcomeTone(event.outcome), text: text(event.outcome) }),
+  );
+}
+
+function attemptLadder(event) {
+  const attempts = event.attempts || [];
+  if (!attempts.length) {
+    return el("p", { class: "muted small", text: "No upstream attempt was made." });
+  }
+  return el("div", { class: "ladder" },
+    ...attempts.map((attempt, index) => el("div", { class: "ladder-step" },
+      el("code", { class: "ladder-ord", text: String(index) }),
+      el("div", { class: "ladder-main" },
+        el("code", { class: "ladder-target", text: text(attempt.provider) + " · " + text(attempt.model) }),
+        el("span", { class: "ladder-note", text:
+          millis(attempt.latency_ms) +
+          (attempt.http_status ? " · http " + attempt.http_status : "") +
+          (attempt.used_fallback ? " · fallback" : "") +
+          (attempt.cooldown_scope ? " · cooled scope " + attempt.cooldown_scope : "") }),
+      ),
+      el("code", { class: "ladder-outcome " + attemptTone(attempt.outcome), text: text(attempt.outcome) }),
+    )));
+}
+
+function exclusionList(event) {
+  const exclusions = event.exclusions || [];
+  if (!exclusions.length) return null;
+  return el("div", null,
+    el("span", { class: "fact-label", text: "Excluded before any attempt" }),
+    el("div", { class: "exclusions" },
+      ...exclusions.map((item) => el("div", { class: "exclusion-row" },
+        el("code", { class: "exclusion-target", text: text(item.provider) + "/" + text(item.model) }),
+        el("code", { class: "exclusion-reason t-warn", text: text(item.reason) + (item.scope ? " · scope " + item.scope : "") }),
+      ))));
+}
+
+function fusionEvidence(event) {
+  if (!event.fusion) return null;
+  return el("div", null,
+    el("span", { class: "fact-label", text: "Fusion evidence" }),
+    el("div", { class: "inspect-rows" },
+      ...Object.entries(event.fusion).map(([key, value]) => el("div", { class: "inspect-row" },
+        el("span", { text: key }),
+        codeText(value === null || value === undefined ? "—" : (typeof value === "object" ? JSON.stringify(value) : value))))));
+}
+
+function decisionInspector(event) {
+  const rows = [
+    ["request id", text(event.request_id), "t-ink"],
+    ["timestamp", text(event.timestamp), "t-mono"],
+    ["outcome", text(event.outcome), outcomeTone(event.outcome)],
+    ["http status", text(event.http_status), "t-mono"],
+    ["provider / model", event.provider && event.model ? event.provider + "/" + event.model : "none selected",
+     event.provider ? "t-ink" : "t-warn"],
+    ["credential", text(event.credential_ref || event.credential || "—"), "t-mono"],
+    ["used_fallback", event.used_fallback ? "yes" : "no", event.used_fallback ? "t-warn" : "t-mono"],
+    ["latency", millis(event.latency_ms), "t-mono"],
+    ["identity", text(event.identity || "—"), "t-mono"],
+    ["streaming", event.streaming ? "yes" : "no", "t-mono"],
+    // the revision this decision ran under, which is not necessarily the one
+    // active now
+    ["config_version", text(event.config_version), "t-ink"],
+    ["config_checksum", short(event.config_checksum), "t-mono"],
+  ];
+  return el("aside", { class: "inspector", attrs: { id: "inspector", "aria-live": "polite", tabindex: "-1" } },
+    el("span", { class: "fact-label", text: "Decision inspector" }),
+    el("div", { class: "inspect-rows" },
+      ...rows.map(([k, v, tone]) => el("div", { class: "inspect-row" }, el("span", { text: k }), codeText(v, tone)))),
+    el("div", { class: "inspect-identities" },
+      el("span", { class: "fact-label", text: "Attempt ladder" }),
+      attemptLadder(event)),
+    exclusionList(event),
+    fusionEvidence(event),
+  );
+}
+
+function recentDecisions(entry) {
+  const decisions = decisionsFor(entry.alias);
+  if (!decisions.length) {
+    return el("div", { class: "decisions" },
+      el("div", { class: "section-title", text: "Recent decisions" }),
+      pending("No decisions retained since boot.",
+        "Routing decisions are retained in memory for the current process and are not persistent history."));
+  }
+  return el("div", { class: "decisions" },
+    el("div", { class: "section-title", text: "Recent decisions" }),
+    el("div", { class: "decision-head" },
+      el("span", { text: "Time" }), el("span", { text: "Request" }), el("span", { text: "Decision" }),
+      el("span", { text: "Latency" }), el("span", { text: "Status" }), el("span", { text: "Outcome" })),
+    ...decisions.map(decisionRow));
 }
 
 // ---- render ----
