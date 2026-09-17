@@ -561,6 +561,21 @@ async def test_route_state_comes_only_from_the_projection(monkeypatch, tmp_path)
         assert derivation not in script, f"route state must not be derived client-side: {derivation}"
 
 
+def _function_block(script: str, name: str) -> str:
+    """The source of one top-level `const NAME = { ... };` object literal."""
+
+    start = script.index(f"const {name} = {{")
+    depth = 0
+    for i in range(script.index("{", start), len(script)):
+        if script[i] == "{":
+            depth += 1
+        elif script[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return script[start : i + 1]
+    raise AssertionError(f"unterminated block {name}")
+
+
 def _function_source(script: str, name: str) -> str:
     """The code of one top-level function, by brace balance, without its
     comments — these assertions are about what the function does, and a comment
@@ -641,3 +656,100 @@ async def test_no_credential_derived_routability_remains_in_the_console(monkeypa
     app = make_app(monkeypatch, tmp_path)
     script = (await fetch(app, "/admin/ui/app.js")).text
     assert "function configuredProviders(" not in script, "the credential-presence map has no remaining purpose"
+
+
+# -- operational decision visibility -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_decisions_carry_the_exact_empty_state_semantics(monkeypatch, tmp_path):
+    """The ring is bounded and per-process; the empty state says so without
+    claiming a capacity the API does not expose."""
+
+    app = make_app(monkeypatch, tmp_path)
+    script = (await fetch(app, "/admin/ui/app.js")).text
+
+    assert "No decisions retained since boot." in script
+    assert (
+        "Routing decisions are retained in memory for the current process and are not persistent history."
+        in script
+    )
+    # capacity is an implementation detail of the deque, not a published fact
+    assert "50" not in _function_source(script, "recentDecisions")
+
+
+@pytest.mark.asyncio
+async def test_decisions_use_only_the_outcome_vocabularies_cerberus_emits(monkeypatch, tmp_path):
+    """A console-invented outcome category would be a claim the gateway never
+    makes, so both maps are checked against the Literals themselves."""
+
+    from cerberus.telemetry.emitter import AttemptOutcome, RoutingOutcome
+
+    app = make_app(monkeypatch, tmp_path)
+    script = (await fetch(app, "/admin/ui/app.js")).text
+
+    outcomes = set(re.findall(r"^  (\w+): \"t-\w+\",$", _function_block(script, "OUTCOME_TONE"), re.M))
+    attempts = set(re.findall(r"^  (\w+): \"t-\w+\",$", _function_block(script, "ATTEMPT_TONE"), re.M))
+
+    assert outcomes <= set(RoutingOutcome.__args__), outcomes - set(RoutingOutcome.__args__)
+    assert attempts <= set(AttemptOutcome.__args__), attempts - set(AttemptOutcome.__args__)
+    # and every outcome the gateway can emit is accounted for
+    assert set(RoutingOutcome.__args__) <= outcomes
+    assert set(AttemptOutcome.__args__) <= attempts
+
+
+@pytest.mark.asyncio
+async def test_decisions_are_filtered_by_alias_and_not_re_sorted(monkeypatch, tmp_path):
+    app = make_app(monkeypatch, tmp_path)
+    script = (await fetch(app, "/admin/ui/app.js")).text
+    source = _function_source(script, "decisionsFor")
+
+    assert "event.alias === aliasName" in source
+    # the server ring is already newest-first; re-sorting would invent an order
+    assert ".sort(" not in source and ".reverse()" not in source
+
+
+@pytest.mark.asyncio
+async def test_history_is_rendered_from_the_event_never_from_current_route_state(monkeypatch, tmp_path):
+    """A recorded decision's attempts, exclusions and revision are its own. The
+    current projection may legitimately differ after a cooldown expiry, a health
+    change, an activation or a credential appearing."""
+
+    app = make_app(monkeypatch, tmp_path)
+    script = (await fetch(app, "/admin/ui/app.js")).text
+
+    for name in ("attemptLadder", "exclusionList", "fusionEvidence", "decisionInspector"):
+        source = _function_source(script, name)
+        for current in ("STATE.routes", "projectedAliases", "aliasRoutable", "STATE.status"):
+            assert current not in source, f"{name} must not explain history with current state: {current}"
+
+    # the revision shown for a decision is the one recorded on it
+    inspector = _function_source(script, "decisionInspector")
+    assert "event.config_version" in inspector and "event.config_checksum" in inspector
+
+    # skipped candidates stay in exclusions; they are never rebuilt as attempts
+    ladder = _function_source(script, "attemptLadder")
+    assert "exclusions" not in ladder
+
+
+@pytest.mark.asyncio
+async def test_telemetry_lane_labels_only_what_the_contract_proves(monkeypatch, tmp_path):
+    app = make_app(monkeypatch, tmp_path)
+    script = (await fetch(app, "/admin/ui/app.js")).text
+    lane = _function_source(script, "telemetryLane")
+
+    for phrase in (
+        "No telemetry sink configured",
+        "Configured · awaiting first successful delivery",
+        "Delivery healthy",
+        "Delivery degraded",
+    ):
+        assert phrase in script, phrase
+
+    # the health contract carries no queue depth, sink URL, token location or
+    # destination, so the lane may not draw one
+    for invented in ("queue_depth", "queue depth", "endpoint", "sink_url", "bearer", "token"):
+        assert invented not in lane, f"telemetry lane must not claim {invented}"
+
+    telemetry = (await fetch(app, "/admin/health")).json()["telemetry"]
+    assert "queue_depth" not in telemetry and "endpoint" not in telemetry
