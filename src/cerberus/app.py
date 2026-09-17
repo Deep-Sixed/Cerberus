@@ -76,6 +76,26 @@ def _release_id() -> str:
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
+# The audit read is bounded: the table is lifetime history and a console asking
+# for all of it would grow without limit. No cursor yet — a bounded newest-first
+# window is what the screen needs, and pagination can be designed when something
+# actually needs to walk further back.
+_AUDIT_LIMIT_DEFAULT = 100
+_AUDIT_LIMIT_MIN = 1
+_AUDIT_LIMIT_MAX = 500
+
+
+def _audit_limit(raw: str | None) -> int:
+    """Clamp the caller's limit into range; an unreadable one takes the default."""
+
+    if raw is None:
+        return _AUDIT_LIMIT_DEFAULT
+    try:
+        requested = int(raw)
+    except ValueError:
+        return _AUDIT_LIMIT_DEFAULT
+    return max(_AUDIT_LIMIT_MIN, min(_AUDIT_LIMIT_MAX, requested))
+
 _ADMIN_UI_HEADERS = {
     "cache-control": "no-store",
     "x-content-type-options": "nosniff",
@@ -641,6 +661,34 @@ def create_app(
                 store=store,
                 backend_names=fusion_backends.keys(),
             ),
+            headers=_ADMIN_UI_HEADERS,
+        )
+
+    @app.get("/admin/audit", include_in_schema=False, response_model=None)
+    async def admin_audit(request: Request) -> Response:
+        """Control-plane lifecycle history: what changed about the configuration.
+
+        Not routing history — that is /admin/events, which is an ephemeral
+        per-process ring. These are persisted records of registration,
+        bootstrap seeding, activation and rollback, and they survive restart.
+        Both have timestamps and they are not the same thing.
+
+        Read-only by construction: this endpoint reads, and no endpoint writes,
+        deletes or acknowledges an audit record. Without a SQLite control plane
+        there is no durable history to read, and the answer says so rather than
+        implying an in-memory deployment keeps one.
+        """
+
+        denied = await admin_gate(request, read_only=True)
+        if denied is not None:
+            return denied
+        if control_plane is None:
+            return JSONResponse(
+                content={"persistent": False, "records": []}, headers=_ADMIN_UI_HEADERS
+            )
+        limit = _audit_limit(request.query_params.get("limit"))
+        return JSONResponse(
+            content={"persistent": True, "records": control_plane.audit_records(limit=limit)},
             headers=_ADMIN_UI_HEADERS,
         )
 

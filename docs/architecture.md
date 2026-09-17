@@ -97,6 +97,30 @@ not run. The endpoint names credential references but never a secret value or
 the environment variable one is read from, opens no upstream connection, and
 applies no cooldown.
 
+`/admin/audit` answers what changed about the configuration: the control plane's
+own registration, bootstrap, activation and rollback records, newest first and
+read-only. Nothing writes, deletes or acknowledges a record, and the endpoint
+adds no table and no migration — it reads the `audit_records` rows `activate()`
+has always written, and `operator_activated` already derives from. `detail_json`
+is parsed server-side and returned as `detail`; the stored column is never handed
+over raw. The read is bounded (`?limit=`, default 100, clamped to 1..500) because
+the table is lifetime history; there is no cursor, which is a thing to design when
+something needs to walk further back than that window. A deployment with no
+control-plane database answers `{"persistent": false, "records": []}` rather than
+implying it keeps durable history.
+
+Every field on that surface is bounded by construction, which is why it can be
+exposed at all: `action` is one of the four literals `_audit` is called with,
+`revision` is a config version the schema constrains to `cerberus-YYYY-MM-DD.N`,
+`checksum` is a digest, `occurred_at` is a timestamp, and `detail` is either `{}`
+or `{"activated_at": …}`. No credential, environment-variable name, candidate
+file content or filesystem path is stored, so none can be read back.
+
+Audit and the routing ring are different surfaces and stay that way. Audit is
+persisted control and configuration lifecycle; `/admin/events` is ephemeral
+per-process routing history. Both carry timestamps, which is not a reason to
+merge them.
+
 The order those runtime gates run in lives in `router/availability.py` and is
 read from there by both the dispatch loop and the projection. Two copies would
 be free to drift, and the console would then describe a skip the router does not

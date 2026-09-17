@@ -24,7 +24,7 @@ CSRF = {"x-cerberus-csrf": "1"}
 # every URL the console is allowed to touch (all GET), and its own assets
 DASHBOARD_DATA_URLS = {
     "/admin/health", "/admin/status", "/admin/config/active", "/admin/config/schema",
-    "/admin/events", "/admin/providers", "/admin/routes",
+    "/admin/events", "/admin/providers", "/admin/routes", "/admin/audit",
 }
 DASHBOARD_ASSET_URLS = {"/admin/ui", "/admin/ui/app.css", "/admin/ui/app.js"}
 
@@ -512,15 +512,34 @@ async def test_console_state_is_derived_from_operator_activation_and_the_event_r
 
 
 @pytest.mark.asyncio
-async def test_deferred_surfaces_are_named_not_faked(monkeypatch, tmp_path):
-    """Audit has no read-only endpoint in 0.2.0, so the shell says so rather
-    than rendering an invented history. Routes is no longer deferred: it reads
-    the server-side projection."""
+async def test_every_nav_surface_now_reads_a_real_endpoint(monkeypatch, tmp_path):
+    """Nothing in the navigation is a placeholder any more: Routes reads the
+    server-side projection, Decisions the event ring, and Audit the control-plane
+    history that used to be an acknowledged API gap."""
 
     app = make_app(monkeypatch, tmp_path)
     script = (await fetch(app, "/admin/ui/app.js")).text
-    assert "no read-only audit endpoint" in script.lower()
-    assert "ENDPOINTS.routes" in script
+    for endpoint in ("ENDPOINTS.routes", "ENDPOINTS.events", "ENDPOINTS.audit"):
+        assert endpoint in script
+    assert "no read-only audit endpoint" not in script.lower()
+
+
+@pytest.mark.asyncio
+async def test_audit_view_reads_only_the_audit_endpoint(monkeypatch, tmp_path):
+    """Audit is persisted control-plane lifecycle history; the routing ring is a
+    different surface and this view never reaches for it."""
+
+    app = make_app(monkeypatch, tmp_path)
+    script = (await fetch(app, "/admin/ui/app.js")).text
+    view = _function_source(script, "viewAudit")
+
+    assert "STATE.audit" in view
+    for routing in ("STATE.events", "decisionsFor", "ENDPOINTS.events", "attempts", "exclusions"):
+        assert routing not in view, f"the Audit view must not read routing history: {routing}"
+    # actions are rendered as recorded, not mapped into a console taxonomy
+    assert "record.action" in view
+    for invented in ("ACTION_LABEL", "ACTION_TONE", "friendlyAction"):
+        assert invented not in script, f"actions must be shown as recorded: {invented}"
 
 
 @pytest.mark.asyncio
