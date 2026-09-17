@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from cerberus import __version__
 from cerberus.control import ConfigLifecycle, SqliteControlPlane
 from cerberus.control.admin_fields import apply_updates, build_schema, stage
+from cerberus.control.routes import route_projection
 from cerberus.control.candidates import (
     CandidateRejected,
     allowed_roots,
@@ -610,6 +611,38 @@ def create_app(
         except (CandidateRejected, ValidationError, RuntimeError, OSError, ValueError, yaml.YAMLError) as exc:
             return candidate_failure("armed", exc)
         return JSONResponse(content={"shadow_version": shadow.version if shadow else None})
+
+    @app.get("/admin/routes", include_in_schema=False, response_model=None)
+    async def admin_routes(request: Request) -> Response:
+        """The active revision's routes, with every state resolved server-side.
+
+        The console must not decide whether a path is policy-eligible, whether
+        paid fallback applies, whether health or a cooldown excludes a provider,
+        or how a fusion chain resolves — those are routing decisions, and a
+        browser that re-derived them would be a second router free to disagree
+        with the real one. This answers with the router's own verdicts: the same
+        cost gate, the same health/cooldown/credential order the failover loop
+        walks, the same authorization predicate the inference path applies, and
+        the same three gates fusion dispatch refuses on.
+
+        Read-only, and behind the same boundary as /admin/status: the projection
+        names every provider, model and credential reference in the revision, so
+        it is routing topology and never anonymous. It opens no upstream
+        connection and applies no cooldown.
+        """
+
+        denied = await admin_gate(request, read_only=True)
+        if denied is not None:
+            return denied
+        return JSONResponse(
+            content=route_projection(
+                lifecycle.active,
+                control_plane=control_plane,
+                store=store,
+                backend_names=fusion_backends.keys(),
+            ),
+            headers=_ADMIN_UI_HEADERS,
+        )
 
     @app.get("/admin/events", include_in_schema=False, response_model=None)
     async def admin_events(request: Request) -> Response:

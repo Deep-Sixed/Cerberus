@@ -25,6 +25,7 @@ from cerberus.egress.client import (
     token_usage,
 )
 from cerberus.registry.loader import ConfigDocument
+from cerberus.router.availability import runtime_exclusion
 from cerberus.router.engine import Target, cost_eligible, ordered_targets
 from cerberus.state.cooldowns import InMemoryCooldownStore
 from cerberus.telemetry import RoutingAttempt, RoutingEvent, RoutingOutcome, TelemetryEmitter
@@ -203,22 +204,20 @@ async def dispatch(
     attempted = 0
 
     for index, target in enumerate(eligible):
-        if control_plane is not None and not control_plane.provider_available(target.provider_id):
-            exclusions.append({**target.describe(), "reason": "provider_down"})
-            continue
-        cooldown = store.active_for(target.provider_id, target.credential_id, target.model)
-        if cooldown is not None:
-            exclusions.append(
-                {**target.describe(), "reason": f"cooldown_{cooldown.reason}", "scope": cooldown.scope}
-            )
+        # health -> cooldown -> credential, in that order, from the one helper
+        # /admin/routes also reads, so the console can never describe a skip the
+        # loop would not actually make
+        attempt_started = time.perf_counter()
+        blocked = runtime_exclusion(target, control_plane=control_plane, store=store)
+        if blocked is not None:
+            exclusions.append({**target.describe(), **blocked.telemetry()})
+            if blocked.reason == "missing_credentials":
+                attempts.append(
+                    _attempt(target, "missing_credentials", attempt_started, fallback=index > 0)
+                )
             continue
 
         api_key = os.environ.get(target.api_key_env, "").strip()
-        attempt_started = time.perf_counter()
-        if not api_key:
-            exclusions.append({**target.describe(), "reason": "missing_credentials"})
-            attempts.append(_attempt(target, "missing_credentials", attempt_started, fallback=index > 0))
-            continue
 
         attempted += 1
         request = build_upstream_request(client, target, body, api_key)

@@ -24,7 +24,7 @@ CSRF = {"x-cerberus-csrf": "1"}
 # every URL the console is allowed to touch (all GET), and its own assets
 DASHBOARD_DATA_URLS = {
     "/admin/health", "/admin/status", "/admin/config/active", "/admin/config/schema",
-    "/admin/events", "/admin/providers",
+    "/admin/events", "/admin/providers", "/admin/routes",
 }
 DASHBOARD_ASSET_URLS = {"/admin/ui", "/admin/ui/app.css", "/admin/ui/app.js"}
 
@@ -513,10 +513,49 @@ async def test_console_state_is_derived_from_operator_activation_and_the_event_r
 
 @pytest.mark.asyncio
 async def test_deferred_surfaces_are_named_not_faked(monkeypatch, tmp_path):
-    """Route topology and audit history are later work packages. The shell
-    reserves their place and says so rather than rendering invented data."""
+    """Audit has no read-only endpoint in 0.2.0, so the shell says so rather
+    than rendering an invented history. Routes is no longer deferred: it reads
+    the server-side projection."""
 
     app = make_app(monkeypatch, tmp_path)
     script = (await fetch(app, "/admin/ui/app.js")).text
-    assert "work package #13" in script, "the routes view must name the work package that fills it"
     assert "no read-only audit endpoint" in script.lower()
+    assert "ENDPOINTS.routes" in script
+
+
+@pytest.mark.asyncio
+async def test_console_can_restore_keyboard_focus_across_rerenders(monkeypatch, tmp_path):
+    """Every render replaces whole subtrees, which destroys the focused control
+    and drops focus to <body>. The script gives its controls stable ids and
+    re-focuses by id, so selecting a route path does not cost a keyboard
+    operator their place."""
+
+    app = make_app(monkeypatch, tmp_path)
+    script = (await fetch(app, "/admin/ui/app.js")).text
+    for anchor in ('id: "nav-"', 'id: "alias-tab-"', 'id: "path-row-"'):
+        assert anchor in script, f"a rebuilt control needs a stable id: {anchor}"
+    assert "document.activeElement" in script and "again.focus()" in script
+
+
+@pytest.mark.asyncio
+async def test_route_state_comes_only_from_the_projection(monkeypatch, tmp_path):
+    """The console labels the server's verdicts; it must not re-derive one.
+    None of the router's decision inputs are recomputed in the browser."""
+
+    app = make_app(monkeypatch, tmp_path)
+    script = (await fetch(app, "/admin/ui/app.js")).text
+
+    # Stated positively, because the console legitimately *displays* policy
+    # fields — an alias's allow_paid_fallback, an identity's allowed_modes, a
+    # candidate's cost_tier. Displaying a field is not deciding with it. What
+    # must never happen is the browser producing a verdict of its own, so the
+    # verdicts it renders are asserted to come from the projection.
+    assert 'path.state === "eligible"' in script
+    assert 'path.state === "standby"' in script
+    assert "path.exclusion.reason" in script
+    assert "i.authorized" in script
+    assert "readiness" in script
+
+    # these have no purpose except re-deriving a decision the router already made
+    for derivation in ("allowed_aliases", ".allowed_modes.includes", "has_free", "hasFree"):
+        assert derivation not in script, f"route state must not be derived client-side: {derivation}"

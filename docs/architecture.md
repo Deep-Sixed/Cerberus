@@ -77,6 +77,31 @@ from the event ring, never from a stored lifecycle flag: first run is about
 establishing the first operator-managed revision, not about a gateway that
 cannot serve.
 
+`/admin/routes` answers what the router would do with the active revision,
+resolved server-side. The console must not decide whether a route path is
+policy-eligible, whether paid fallback applies, whether health or a cooldown
+excludes a provider, or how a fusion chain resolves — a browser that re-derived
+those would be a second router, free to disagree with the real one. The
+projection reports the router's own verdicts instead: `engine.cost_eligible` for
+the cost gate, `availability.runtime_exclusion` for health, cooldown and
+credential presence in the failover loop's order, `auth.authorization_error` for
+each configured identity, and `fusion.fusion_readiness` for a fusion alias's
+three gates. A path is `eligible` when the router would attempt it first,
+`standby` when it is attemptable but a later preference, and `excluded` when the
+router would skip it before any upstream request — carrying the first reason the
+loop would reach, so a cost-prohibited path reports the prohibition even when it
+is also cooled down. Fusion is projected as a service chain (panel, analyst,
+resolved outer model) with one readiness verdict, because its panel never enters
+the failover loop and labelling members eligible would describe a loop that does
+not run. The endpoint names credential references but never a secret value or
+the environment variable one is read from, opens no upstream connection, and
+applies no cooldown.
+
+The order those runtime gates run in lives in `router/availability.py` and is
+read from there by both the dispatch loop and the projection. Two copies would
+be free to drift, and the console would then describe a skip the router does not
+make.
+
 Staging is for edits. `apply_updates` bumps the version only when something
 changed, so staging an empty edit would write a re-serialized copy of the active
 document under its own version — a candidate `/admin/validate` must then refuse,
