@@ -603,3 +603,41 @@ async def test_header_routability_reads_the_projection_not_credential_presence(m
         "STATE.providers", "STATE.config", "allow_paid",
     ):
         assert proxy not in deciding, f"routability must not be derived from {proxy}"
+
+
+@pytest.mark.asyncio
+async def test_alias_rows_and_the_header_share_one_routability_predicate(monkeypatch, tmp_path):
+    """The Aliases table recomputed routability from credential presence, so it
+    could contradict the header it sits under — the header read "0 of 2 aliases"
+    from the projection while both rows still read routable. Both now join to the
+    projection through the same predicate, which is what makes that impossible."""
+
+    app = make_app(monkeypatch, tmp_path)
+    script = (await fetch(app, "/admin/ui/app.js")).text
+    rows = _function_source(script, "viewAliases")
+    header = _function_source(script, "routableCount")
+
+    # one predicate, both callers — not a second routing decision
+    assert "aliasRoutable(entry)" in rows
+    assert "aliasRoutable" in header
+    assert script.count("function aliasRoutable(") == 1
+    assert "projectedAliases()" in rows
+
+    # a named cause the console cannot know: provider health, a cooldown, cost
+    # policy or fusion readiness may each be why an alias is withheld
+    assert "missing_credentials" not in rows
+    assert "unavailable" in rows
+
+    for proxy in ("configured", "configuredProviders", "STATE.providers", "cost_tier"):
+        assert proxy not in rows, f"alias state must not be derived from {proxy}"
+
+
+@pytest.mark.asyncio
+async def test_no_credential_derived_routability_remains_in_the_console(monkeypatch, tmp_path):
+    """Credential presence may still be *stated* — the first-run boot facts and
+    the provider cards do exactly that — but it may no longer stand in for
+    whether a route can be taken."""
+
+    app = make_app(monkeypatch, tmp_path)
+    script = (await fetch(app, "/admin/ui/app.js")).text
+    assert "function configuredProviders(" not in script, "the credential-presence map has no remaining purpose"

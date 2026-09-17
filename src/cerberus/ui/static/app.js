@@ -428,22 +428,26 @@ function pending(title, body, gap) {
     el("strong", { text: title }), el("p", { text: body }));
 }
 
-function configuredProviders() {
-  const map = {};
-  for (const p of STATE.providers) map[p.name] = p.configured;
-  return map;
-}
-
 function viewAliases() {
-  const configured = configuredProviders();
+  // Mode, candidate count and the cost gate are configuration, shown as the
+  // revision writes them. State is not: it is joined to the same projection the
+  // header counts, through the same predicate, so a row can never contradict
+  // the count above it.
+  const projected = {};
+  for (const entry of projectedAliases()) projected[entry.alias] = entry;
+
   const rows = aliasEntries().map(([name, a]) => {
-    const routable = (a.candidates || []).some((c) => configured[c.provider]);
+    const entry = projected[name];
+    const routable = entry !== undefined && aliasRoutable(entry);
     return [
       codeText(name),
       el("span", { class: "pill", text: text(a.mode) }),
       String((a.candidates || []).length),
       a.allow_paid_fallback ? "paid fallback" : "free only",
-      el("span", { class: "pill " + (routable ? "up" : "bad"), text: routable ? "routable" : "missing_credentials" }),
+      // "unavailable", never a named cause: provider health, a cooldown, cost
+      // policy or fusion readiness may each be why, and the console does not
+      // get to guess which
+      el("span", { class: "pill " + (routable ? "up" : "bad"), text: routable ? "routable" : "unavailable" }),
     ];
   });
   return table(["Alias", "Mode", "Candidate paths", "Gate", "State"], rows);
