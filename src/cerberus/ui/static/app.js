@@ -31,6 +31,9 @@ const ENDPOINTS = {
   // routing decisions, and a browser that re-derived them would be a second
   // router free to disagree with the real one
   routes: "/admin/routes",
+  // control-plane lifecycle history. Persisted and restart-surviving, which is
+  // what separates it from the ephemeral routing ring at /admin/events.
+  audit: "/admin/audit",
   stage: "/admin/config/stage",
   validate: "/admin/validate",
   activate: "/admin/activate",
@@ -99,7 +102,7 @@ function basename(path) {
 
 // ---- state ----
 
-let STATE = { health: {}, status: {}, config: {}, schema: {}, events: [], providers: [], routes: {} };
+let STATE = { health: {}, status: {}, config: {}, schema: {}, events: [], providers: [], routes: {}, audit: {} };
 // which route path the inspector is describing; never a routing decision
 let SELECTION = { alias: null, ordinal: null, decision: null, inspect: "path" };
 let VIEW = "health";
@@ -122,7 +125,7 @@ const VIEW_CHROME = {
   fusion: ["Fusion", "Cerberus holds the policy; the backend holds the deliberation.", "GET /admin/status"],
   providers: ["Providers", "Credential presence, cooldown windows, live probe.", "GET /admin/providers"],
   health: ["Health", "Liveness, telemetry delivery and cooldown state behind the admin boundary.", "GET /admin/health"],
-  audit: ["Audit", "Revision registrations and activations.", "no endpoint"],
+  audit: ["Audit", "What changed in the Cerberus control plane — registrations, activations and rollbacks.", "GET /admin/audit"],
 };
 
 // Derived, never a stored lifecycle flag. Whether anything has been routed since
@@ -174,13 +177,13 @@ function telemetryState() {
 
 async function refresh() {
   try {
-    const [health, status, config, schema, events, providers, routes] = await Promise.all([
+    const [health, status, config, schema, events, providers, routes, audit] = await Promise.all([
       getJSON(ENDPOINTS.health), getJSON(ENDPOINTS.status), getJSON(ENDPOINTS.config),
       getJSON(ENDPOINTS.schema), getJSON(ENDPOINTS.events), getJSON(ENDPOINTS.providers),
-      getJSON(ENDPOINTS.routes),
+      getJSON(ENDPOINTS.routes), getJSON(ENDPOINTS.audit),
     ]);
     STATE = {
-      health, status, config, schema, routes,
+      health, status, config, schema, routes, audit,
       events: events.events || [],
       providers: providers.providers || [],
     };
@@ -225,7 +228,11 @@ function renderHeader() {
 
 function navCount(id) {
   if (!operatorActivated()) return { label: "—", cls: "navcount navcount-dim" };
-  if (id === "audit") return { label: "gap", cls: "navcount navcount-gap" };
+  if (id === "audit") {
+    const audit = STATE.audit || {};
+    if (audit.persistent === false) return { label: "none", cls: "navcount navcount-dim" };
+    return { label: String((audit.records || []).length), cls: "navcount" };
+  }
   if (id === "aliases") return { label: String(aliasEntries().length), cls: "navcount" };
   if (id === "routes") return { label: String(projectedPathCount()), cls: "navcount" };
   if (id === "providers") return { label: String(STATE.providers.length), cls: "navcount" };
@@ -647,8 +654,7 @@ function renderView() {
     providers: viewProviders,
     health: viewHealth,
     routes: viewRoutes,
-    audit: () => pending("No read-only audit endpoint",
-      "Cerberus records revision registrations and activations, but 0.2.0 exposes no endpoint to read them. The screen stays empty until that endpoint exists rather than inventing a history.", true),
+    audit: viewAudit,
   };
   body.replaceChildren(builders[VIEW]());
   if (VIEW === "providers") renderProvidersActions();
@@ -1004,6 +1010,50 @@ function recentDecisions(entry) {
       el("span", { text: "Time" }), el("span", { text: "Request" }), el("span", { text: "Decision" }),
       el("span", { text: "Latency" }), el("span", { text: "Status" }), el("span", { text: "Outcome" })),
     ...decisions.map(decisionRow));
+}
+
+
+// ---- audit ----
+
+/* Control-plane lifecycle history, from /admin/audit alone.
+
+   This screen answers what changed about the configuration: which revisions
+   were registered, seeded, activated or rolled back. It is persisted and it
+   survives restart. It is deliberately not the routing history on the Routes
+   screen, which is an ephemeral per-process ring — both carry timestamps and
+   they are not the same thing, so this view never reads the event ring.
+
+   Actions are rendered exactly as recorded. The console does not group them
+   into a taxonomy of its own: the vocabulary belongs to the control plane. */
+
+function viewAudit() {
+  const audit = STATE.audit || {};
+  if (audit.persistent === false) {
+    return pending("No durable control-plane history",
+      "This deployment runs without a control-plane database, so lifecycle records are not persisted. Configure state.path to retain them.", true);
+  }
+  const records = audit.records || [];
+  if (!records.length) {
+    return pending("No lifecycle records yet",
+      "Registrations, activations and rollbacks appear here as they happen.");
+  }
+  return table(
+    ["Time", "Action", "Revision", "Checksum", "Detail"],
+    records.map((record) => [
+      codeText(record.occurred_at),
+      // recorded vocabulary, not a console taxonomy
+      el("code", { class: "audit-action", text: text(record.action) }),
+      codeText(record.revision),
+      codeText(short(record.checksum)),
+      codeText(detailText(record.detail)),
+    ]),
+  );
+}
+
+function detailText(detail) {
+  const entries = Object.entries(detail || {});
+  if (!entries.length) return "—";
+  return entries.map(([k, v]) => k + ": " + text(v)).join(" · ");
 }
 
 // ---- render ----

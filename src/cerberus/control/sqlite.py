@@ -392,6 +392,46 @@ class SqliteControlPlane:
             ).fetchone()
         return row is not None
 
+    def audit_records(self, *, limit: int) -> list[dict[str, Any]]:
+        """Control-plane lifecycle history, newest first. Read-only.
+
+        Every column here is bounded by construction: ``action`` is one of the
+        four literals ``_audit`` is ever called with, ``revision`` is a config
+        version the schema constrains to ``cerberus-YYYY-MM-DD.N``, ``checksum``
+        is a digest, and ``detail`` is one of the two literal payloads the two
+        call sites pass. No credential, environment name, candidate file content
+        or filesystem path is stored, so none can be read back out.
+
+        ``detail_json`` is parsed here rather than handed over raw: the stored
+        column is this module's business, and a reader should not have to
+        re-parse a string to learn what a record says.
+        """
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT id, occurred_at, action, revision, checksum, detail_json "
+                "FROM audit_records ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                detail = json.loads(row["detail_json"])
+            except (TypeError, ValueError):
+                # a record is history; an unreadable detail never fails the read
+                detail = {}
+            records.append(
+                {
+                    "id": row["id"],
+                    "occurred_at": row["occurred_at"],
+                    "action": row["action"],
+                    "revision": row["revision"],
+                    "checksum": row["checksum"],
+                    "detail": detail if isinstance(detail, dict) else {},
+                }
+            )
+        return records
+
     def provider_available(self, provider: str, *, now: float | None = None) -> bool:
         """Health may exclude a configured provider; it can never add one.
 
