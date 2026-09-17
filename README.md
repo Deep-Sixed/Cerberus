@@ -1,4 +1,4 @@
-# Cerberus 0.2.0
+# Cerberus 0.3.0
 
 Cerberus is an AI service router with stable logical addressing over changing
 providers, models and composed inference paths. Its OpenAI-compatible API exposes
@@ -91,7 +91,7 @@ and [security](SECURITY.md).
 
 ## Release status
 
-This is the 0.2.0 release, not a production-readiness claim. Publication requires operator review of the final sanitized-history and
+This is the 0.3.0 release, not a production-readiness claim. Publication requires operator review of the final sanitized-history and
 validation/provenance report. Host deployment records, production identities,
 secret files and incident runbooks belong outside this product repository.
 
