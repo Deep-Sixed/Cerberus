@@ -9,12 +9,22 @@
 
 # Gates that must PASS by EXECUTION before a change is complete. An agent's
 # attestation can never satisfy one: "a check ran" and "an agent believes it
-# would have passed" are different claims.
-required_gates = ["lint", "tests", "ui-syntax"]
+# would have passed" are different claims. The last six need Docker or a
+# checksum-pinned Gitleaks, so a plain checkout leaves them BLOCKED until CI
+# runs them.
+required_gates = [
+  "lint", "tests", "ui-syntax",
+  "build", "compose", "container-build", "container-smoke", "gitleaks", "history",
+]
 
 # Rungs of the ladder that are judgments rather than executions. They must be
 # attested for the state under composition, and they satisfy nothing else.
 judgment_rungs = ["task", "diff", "self-review", "requirements", "architecture", "fresh-review"]
+
+# Run events whose checkout IS the commit under verification. A pull_request run
+# checks out a synthetic merge of head into base, so its results describe that
+# merge and not the branch tip the run payload names.
+ci_head_events = ["push"]
 
 # What this checkout can execute. The toolchain is pinned: Python 3.14.5 with
 # uv 0.11.29 and the committed uv.lock, Node 26.3.1 for the admin console.
@@ -24,3 +34,23 @@ judgment_rungs = ["task", "diff", "self-review", "requirements", "architecture",
 lint = "uv run --frozen ruff check ."
 tests = "uv run --frozen python -m pytest -q"
 ui-syntax = "node --check src/cerberus/ui/static/app.js"
+
+# The workflow step that establishes each gate, named as the Actions API reports
+# it: an unnamed `run:` step appears as "Run <command>". Renaming a step in
+# .github/workflows/ci.yml without updating this map turns a gate MISSING, which
+# tests/test_verification_policy.py exists to prevent.
+#
+# Several gates rest on one step where that step runs several checks:
+# ./scripts/ci.sh runs ruff and the suite, and scan-secrets.sh runs Gitleaks over
+# history and the tree and then the private-history check. A failed step
+# establishes none of the gates that rest on it.
+[ci_steps]
+lint = "Run ./scripts/ci.sh"
+tests = "Run ./scripts/ci.sh"
+build = "Run uv build --no-build-isolation"
+ui-syntax = "Run node --check src/cerberus/ui/static/app.js"
+compose = "Run python scripts/check-compose.py"
+container-build = "Run docker build -f Containerfile -t cerberus:ci ."
+container-smoke = "Run ./scripts/smoke-container.sh cerberus:ci"
+gitleaks = "Run sh scripts/scan-secrets.sh"
+history = "Run sh scripts/scan-secrets.sh"
