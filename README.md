@@ -19,6 +19,12 @@ uv build --no-build-isolation
 The admin UI is plain HTML, CSS and JavaScript shipped in the wheel; there is no
 separate frontend compilation step. JavaScript syntax is checked with Node 26.3.1.
 
+Coding agents working here follow the [Verification
+Ladder](https://github.com/Deep-Sixed/verification-ladder), installed with the
+agent rather than vendored in this repository. `verification.toml` declares what
+verification must establish for Cerberus; see
+[verification](docs/verification.md).
+
 For a local OpenAI-compatible upstream listening on port 8080:
 
 ```sh
@@ -87,7 +93,7 @@ immutable in-memory snapshot; routing events and usage projections are persisted
 as operational records without storing provider or client secret values.
 
 See [architecture](docs/architecture.md), [persistence](docs/persistence.md),
-and [security](SECURITY.md).
+[verification](docs/verification.md), and [security](SECURITY.md).
 
 ## Release status
 

@@ -1,0 +1,26 @@
+# What "verified" means for Cerberus. The procedure that consumes this file is
+# the Verification Ladder, which lives in its own repository and is installed
+# once per machine rather than vendored here:
+#
+#     https://github.com/Deep-Sixed/verification-ladder
+#
+# Changing anything below changes what this project considers a complete change,
+# so it belongs under review like any other change to Cerberus.
+
+# Gates that must PASS by EXECUTION before a change is complete. An agent's
+# attestation can never satisfy one: "a check ran" and "an agent believes it
+# would have passed" are different claims.
+required_gates = ["lint", "tests", "ui-syntax"]
+
+# Rungs of the ladder that are judgments rather than executions. They must be
+# attested for the state under composition, and they satisfy nothing else.
+judgment_rungs = ["task", "diff", "self-review", "requirements", "architecture", "fresh-review"]
+
+# What this checkout can execute. The toolchain is pinned: Python 3.14.5 with
+# uv 0.11.29 and the committed uv.lock, Node 26.3.1 for the admin console.
+# `./scripts/ci.sh` runs ruff and the suite together; they are separate gates
+# here so a failure names which one.
+[gates.local]
+lint = "uv run --frozen ruff check ."
+tests = "uv run --frozen python -m pytest -q"
+ui-syntax = "node --check src/cerberus/ui/static/app.js"

@@ -16,3 +16,4 @@ secrets/
 *.pem
 *.key
 *.kdbx
+.verification/
