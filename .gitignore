@@ -16,3 +16,6 @@ secrets/
 *.pem
 *.key
 *.kdbx
+
+# Verification Ladder evidence: state-bound, never committed.
+.verification/
