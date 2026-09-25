@@ -1,0 +1,50 @@
+# Cerberus's completion policy for the Verification Ladder.
+#
+# What "complete" means for a change to this repository, read by the Ladder's
+# verify.py (0.3.0, compatibility contract evidence-v3.2). A change is ready for
+# a human gate only when every gate below has PASSED by execution against the
+# exact state under review, and every judgment rung is attested for it.
+
+# The contract that decides here. Committed, so it survives `rm -rf .verification`
+# and a fresh clone; each checkout still activates it with `verify.py qualify`
+# and `verify.py activate`.
+evidence = "verification.ladder.evidence/3"
+
+# Every gate the public-release workflow runs. `suite` also runs locally; the
+# rest only CI establishes, because they need the pinned toolchain, Docker and
+# gitleaks as CI provisions them.
+required_gates = [
+  "suite",
+  "build",
+  "frontend-syntax",
+  "compose-config",
+  "container-build",
+  "container-smoke",
+  "secret-scan",
+]
+judgment_rungs = ["task", "diff", "self-review", "requirements", "architecture", "fresh-review"]
+
+# A pull_request run checks out a merge of the head into its base, so only a
+# push run describes the commit under review.
+ci_head_events = ["push"]
+
+[gates.local]
+suite = "./scripts/ci.sh"
+
+# The only repository, workflow and job whose runs may establish a CI gate here.
+# Declared, never read from the payload under examination.
+[ci]
+repository = "Deep-Sixed/Cerberus"
+workflow = ".github/workflows/ci.yml"
+job = "validate"
+
+# Each gate, mapped to the step of the `validate` job that establishes it.
+# Unnamed `run:` steps are reported by the Actions API as "Run <command>".
+[ci_steps]
+suite = "Run ./scripts/ci.sh"
+build = "Run uv build --no-build-isolation"
+frontend-syntax = "Run node --check src/cerberus/ui/static/app.js"
+compose-config = "Run python scripts/check-compose.py"
+container-build = "Run docker build -f Containerfile -t cerberus:ci ."
+container-smoke = "Run ./scripts/smoke-container.sh cerberus:ci"
+secret-scan = "Run sh scripts/scan-secrets.sh"
