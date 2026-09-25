@@ -698,8 +698,9 @@ function retryNote(retryAt) {
   if (!retryAt) return "";
   const seconds = Math.max(0, Math.round(retryAt - Date.now() / 1000));
   if (seconds < 60) return " · retry in " + seconds + "s";
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.round((seconds % 3600) / 60);
+  const totalMinutes = Math.round(seconds / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
   return " · retry in " + (hours ? hours + "h " + minutes + "m" : minutes + "m");
 }
 
