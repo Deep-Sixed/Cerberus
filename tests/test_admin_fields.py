@@ -171,7 +171,7 @@ async def test_restaging_after_an_abandoned_candidate_validates(env, tmp_path):
     key = "providers.alpha.quota_cooldown_seconds"
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             first = (await client.post("/admin/config/stage", json={"updates": {key: 100}}, headers=CSRF)).json()
             assert (await client.post("/admin/validate", json={"path": first["path"]}, headers=CSRF)).status_code == 200
 
