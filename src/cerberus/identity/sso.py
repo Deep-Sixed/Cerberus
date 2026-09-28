@@ -53,6 +53,10 @@ class AdminSSO:
         self._http = httpx.AsyncClient(transport=transport, timeout=8.0, verify=verify)
         self._keys: dict[str, jwt.PyJWK] = {}
         self._fetched = 0.0
+        # _validate runs for any bearer on any /admin/* request before any other
+        # check, so an unknown kid must not buy an outbound JWKS fetch per request
+        self._refresh_attempted_at = 0.0
+        self._min_refresh_interval = 10.0
         # pending logins + sessions live in a shared store so they survive across
         # workers and restarts; the in-memory default is single-worker only
         self._store: SessionStore = store if store is not None else InMemorySessionStore()
@@ -187,7 +191,10 @@ class AdminSSO:
         self._fetched = time.time()
 
     async def _key_for(self, kid: str) -> jwt.PyJWK | None:
-        if kid not in self._keys or time.time() - self._fetched > 300:
+        now = time.time()
+        wants_refresh = kid not in self._keys or now - self._fetched > 300
+        if wants_refresh and now - self._refresh_attempted_at >= self._min_refresh_interval:
+            self._refresh_attempted_at = now
             try:
                 await self._refresh_keys()
             except (httpx.HTTPError, ValueError):

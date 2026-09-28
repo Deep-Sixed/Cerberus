@@ -79,3 +79,25 @@ def test_sqlite_session_survives_reopen(tmp_path):
         assert reopened.get_session("sid") is not None
     finally:
         reopened.close()
+
+
+def test_pending_logins_are_capped(store, monkeypatch):
+    """/admin/login/start is unauthenticated; a request loop must not grow the
+    pending table without bound. The newest entry always survives."""
+
+    import cerberus.identity.session_store as session_store
+
+    monkeypatch.setattr(session_store, "MAX_PENDING", 3)
+    now = time.time()
+    for i in range(5):
+        store.put_pending(f"s{i}", "n", "v", now + 100 + i)
+    assert store.pop_pending("s0") is None
+    assert store.pop_pending("s1") is None
+    assert store.pop_pending("s4") is not None
+
+
+def test_put_pending_sweeps_expired_rows(store):
+    store.put_pending("old", "n", "v", time.time() - 1)
+    store.put_pending("new", "n", "v", time.time() + 100)
+    assert store.pop_pending("new") is not None
+    assert store.pop_pending("old") is None
