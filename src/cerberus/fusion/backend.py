@@ -16,6 +16,7 @@ from typing import Any, Literal, Protocol
 
 import httpx
 
+from cerberus.caller_fields import caller_body
 from cerberus.telemetry import AttemptOutcome
 
 FusionOutcome = Literal["upstream_error", "fusion_unavailable"]
@@ -104,7 +105,11 @@ class OpenRouterFusionBackend:
 
     @staticmethod
     def build_body(request: FusionRequest) -> dict[str, Any]:
-        body = {k: v for k, v in request.body.items() if k not in ("model", "tools", "tool_choice", "stream")}
+        body = {
+            k: v
+            for k, v in caller_body(request.body).items()
+            if k not in ("model", "tools", "tool_choice", "stream", "functions", "function_call")
+        }
         body["model"] = request.outer_model
         body["tools"] = [
             {
