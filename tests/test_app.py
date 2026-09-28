@@ -50,7 +50,7 @@ def make_config(monkeypatch: pytest.MonkeyPatch, **server) -> CerberusConfig:
 async def call(app, method: str, path: str, **kwargs) -> httpx.Response:
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             return await client.request(method, path, **kwargs)
 
 
@@ -86,7 +86,7 @@ async def test_rate_limit_fails_over_in_declared_order_and_cools_down(monkeypatc
     app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post("/v1/chat/completions", json={"model": "cerberus/main", "messages": []})
             health = await client.get("/admin/health")  # cooldowns are admin-only diagnostics
 
@@ -211,7 +211,7 @@ async def test_external_bind_rejects_unauthenticated_requests(monkeypatch):
     app = create_app(config, http_transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={})))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             unauthorized = await client.get("/v1/models")
             authorized = await client.get("/v1/models", headers={"authorization": "Bearer router-token"})
             non_ascii = await client.get(
@@ -384,7 +384,7 @@ async def test_cooldown_topology_is_never_public(monkeypatch):
     app = create_app(make_config(monkeypatch), http_transport=httpx.MockTransport(upstream))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await client.post("/v1/chat/completions", json={"model": "cerberus/main", "messages": []})
             public = await client.get("/health")
             admin = await client.get("/admin/health")

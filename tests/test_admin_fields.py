@@ -93,7 +93,7 @@ async def test_config_schema_endpoint_is_read_only_gated(env, tmp_path):
     app = create_app(doc, http_transport=httpx.MockTransport(ok_upstream))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             resp = await client.get("/admin/config/schema")
     assert resp.status_code == 200
     keys = {f["key"] for f in resp.json()["fields"]}
@@ -106,7 +106,7 @@ async def test_stage_endpoint_rejects_non_allow_listed_keys(env, tmp_path):
     app = create_app(doc, http_transport=httpx.MockTransport(ok_upstream))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             bad_key = await client.post(
                 "/admin/config/stage",
                 json={"updates": {"providers.alpha.credentials.main.api_key_env": "EVIL"}},
@@ -127,7 +127,7 @@ async def test_stage_validate_activate_loop_changes_live_behavior(env, tmp_path)
     app = create_app(doc, http_transport=httpx.MockTransport(ok_upstream))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             staged = await client.post(
                 "/admin/config/stage",
                 json={"updates": {"providers.alpha.quota_cooldown_seconds": "45"}},

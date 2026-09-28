@@ -46,6 +46,13 @@ class ServerConfig(BaseModel):
     # only — never discovered — and empty by default, so the boundary does not
     # widen unless an operator says so.
     admin_config_roots: list[str] = Field(default_factory=list)
+    # Loopback trust (admin access without a credential, and the token-less
+    # inference surface) also requires the request's Host to name this machine:
+    # localhost, *.localhost, 127.0.0.0/8 or ::1. A DNS-rebinding page reaches
+    # 127.0.0.1 from the operator's browser under its own hostname, so the peer
+    # address alone cannot tell it from a local client. List any other name
+    # local clients use here.
+    trusted_hosts: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_credential_separation(self) -> "ServerConfig":

@@ -58,7 +58,7 @@ def telemetry_config(monkeypatch: pytest.MonkeyPatch, tmp_path) -> CerberusConfi
 
 async def _request(app, body: dict) -> httpx.Response:
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
             return await client.post("/v1/chat/completions", json=body)
 
 
@@ -134,7 +134,7 @@ async def test_unknown_alias_emits_no_event_and_no_caller_text(monkeypatch, tmp_
     app = create_app(config, httpx.MockTransport(upstream), httpx.MockTransport(telemetry))
     unsafe_values = ("prompt-sensitive-value", "x" * 1_000)
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
             for unsafe in unsafe_values:
                 response = await client.post("/v1/chat/completions", json={"model": unsafe, "messages": []})
                 assert response.status_code == 404
@@ -227,7 +227,7 @@ async def test_interrupted_stream_marks_final_attempt(monkeypatch, tmp_path) -> 
 
     app = create_app(config, httpx.MockTransport(upstream), httpx.MockTransport(telemetry))
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
             with pytest.raises(RuntimeError, match="controlled stream interruption"):
                 await client.post(
                     "/v1/chat/completions",
@@ -274,7 +274,7 @@ async def test_http_auth_failure_degrades_telemetry_without_failing_liveness(
     with caplog.at_level(logging.ERROR, logger="cerberus.telemetry.emitter"):
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
                 inference = await client.post(
                     "/v1/chat/completions",
                     json={"model": "cerberus/controlled", "messages": []},
@@ -520,7 +520,7 @@ async def test_event_config_version_binds_to_decision_time_config(monkeypatch, t
     doc_holder["app"] = app
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 40001))
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post("/v1/chat/completions", json={"model": "cerberus/free", "messages": []})
             health = await client.get("/admin/health")
             events = await client.get("/admin/events")
@@ -609,7 +609,7 @@ async def test_interrupted_stream_after_fallback_keeps_fallback_flag(monkeypatch
 
     app = create_app(config, httpx.MockTransport(upstream), httpx.MockTransport(telemetry))
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
             with pytest.raises(RuntimeError, match="controlled stream interruption"):
                 await client.post(
                     "/v1/chat/completions",
@@ -665,7 +665,7 @@ async def test_credential_scoped_429_records_credential_scope(monkeypatch, tmp_p
     app = create_app(config, httpx.MockTransport(upstream), httpx.MockTransport(telemetry))
     body = {"model": "cerberus/controlled", "messages": []}
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
             first = await client.post("/v1/chat/completions", json=body)
             second = await client.post("/v1/chat/completions", json=body)
 

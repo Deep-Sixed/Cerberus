@@ -95,7 +95,7 @@ def ok_upstream(_request: httpx.Request) -> httpx.Response:
 async def post_token(app, token: str) -> httpx.Response:
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             return await client.post(
                 "/v1/chat/completions",
                 json={"model": "cerberus/free", "messages": []},
@@ -166,7 +166,7 @@ async def test_key_rotation_overlap_via_kid(monkeypatch):
     )
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             for key in (old, new):
                 response = await client.post(
                     "/v1/chat/completions",
@@ -187,7 +187,7 @@ async def test_authentik_outage_after_cache_still_validates(monkeypatch):
     )
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             first = await client.post(
                 "/v1/chat/completions",
                 json={"model": "cerberus/free", "messages": []},

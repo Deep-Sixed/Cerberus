@@ -105,7 +105,7 @@ async def test_credential_scoped_429_disables_sibling_models(monkeypatch, tmp_pa
     app = create_app(escalation_config(monkeypatch, tmp_path), http_transport=httpx.MockTransport(upstream))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post("/v1/chat/completions", json={"model": "cerberus/free", "messages": []})
             health = await client.get("/admin/health")
 
@@ -126,7 +126,7 @@ async def test_cooldown_survives_app_restart(monkeypatch, tmp_path):
     app_one = create_app(config, http_transport=httpx.MockTransport(upstream))
     async with app_one.router.lifespan_context(app_one):
         transport = httpx.ASGITransport(app=app_one)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await client.post("/v1/chat/completions", json={"model": "cerberus/free", "messages": []})
 
     upstream_calls = 0
@@ -139,7 +139,7 @@ async def test_cooldown_survives_app_restart(monkeypatch, tmp_path):
     app_two = create_app(config, http_transport=httpx.MockTransport(upstream_after_restart))
     async with app_two.router.lifespan_context(app_two):
         transport = httpx.ASGITransport(app=app_two)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post("/v1/chat/completions", json={"model": "cerberus/free", "messages": []})
 
     assert response.status_code == 503  # still cooled from before the restart

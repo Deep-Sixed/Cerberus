@@ -17,6 +17,15 @@ directly, bypassing Cerberus policy, so scope and rotate it as you would any
 provider key. An unpublished container port alone does not protect against other
 containers on the same network or a privileged host operator.
 
+Loopback peers are trusted as admins, and without `server.api_token_env` they may
+use the inference surface. That trust also requires the request's `Host` to name
+this machine (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`, or a name listed in
+`server.trusted_hosts`), which defeats DNS rebinding from a local browser. Do not
+put a reverse proxy on the same host in front of a bare `cerberus serve` that
+forwards to 127.0.0.1 with a loopback `Host`: every proxied request would then be
+a loopback peer. Configure admin SSO or tokens and have the proxy pass the public
+`Host` through.
+
 Admin sessions and pending OIDC logins contain identity and authentication
 material. Restrict state-volume access and protect backups. See
 `docs/persistence.md` for supported deployment limits and recovery behavior.

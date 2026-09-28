@@ -60,7 +60,7 @@ def ok_upstream(_request: httpx.Request) -> httpx.Response:
 async def post(app, body, headers=None) -> httpx.Response:
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             return await client.post("/v1/chat/completions", json=body, headers=headers or {})
 
 
@@ -171,7 +171,7 @@ async def test_models_endpoint_is_scoped_to_the_identity(monkeypatch):
     app = create_app(identity_config(monkeypatch), http_transport=httpx.MockTransport(ok_upstream))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             recon = await client.get("/v1/models", headers={"authorization": "Bearer cb-recon-key"})
             coder = await client.get("/v1/models", headers={"x-api-key": "cb-coder-key"})
             anonymous = await client.get("/v1/models")

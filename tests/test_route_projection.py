@@ -97,7 +97,7 @@ def build(tmp_path, raw, *, transport=None):
 
 def client_for(app):
     return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app, client=LOOPBACK), base_url="http://test"
+        transport=httpx.ASGITransport(app=app, client=LOOPBACK), base_url="http://localhost"
     )
 
 

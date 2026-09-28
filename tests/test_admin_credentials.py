@@ -95,7 +95,7 @@ async def test_validated_inference_token_still_denied_on_all_mutations(monkeypat
     app = make_tokened_app(monkeypatch, tmp_path)
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app, client=REMOTE)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as remote:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as remote:
             for url in MUTATION_URLS:
                 response = await remote.post(url, json={}, headers={"authorization": "Bearer inference-token"})
                 assert response.status_code == 403, url
@@ -106,13 +106,13 @@ async def test_validated_admin_token_keeps_read_only_remote_and_loopback_mutatio
     app = make_tokened_app(monkeypatch, tmp_path)
     async with app.router.lifespan_context(app):
         remote_transport = httpx.ASGITransport(app=app, client=REMOTE)
-        async with httpx.AsyncClient(transport=remote_transport, base_url="http://test") as remote:
+        async with httpx.AsyncClient(transport=remote_transport, base_url="http://localhost") as remote:
             admin = {"authorization": "Bearer admin-secret"}
             assert (await remote.get("/admin/events", headers=admin)).status_code == 200
             for url in MUTATION_URLS:
                 assert (await remote.post(url, json={}, headers=admin)).status_code == 403, url
         local_transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 40001))
-        async with httpx.AsyncClient(transport=local_transport, base_url="http://test") as local:
+        async with httpx.AsyncClient(transport=local_transport, base_url="http://localhost") as local:
             # auth + CSRF ok, body invalid
             assert (await local.post("/admin/validate", json={}, headers=CSRF)).status_code == 400
 

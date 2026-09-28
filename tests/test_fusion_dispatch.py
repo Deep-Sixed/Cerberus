@@ -109,7 +109,7 @@ def make_app(monkeypatch, tmp_path, *, raw=None, respond=openrouter_ok, api_key=
 
 
 def client_for(app):
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 40001)), base_url="http://t")
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 40001)), base_url="http://localhost")
 
 
 AUTH = {"authorization": "Bearer cb-dev"}
