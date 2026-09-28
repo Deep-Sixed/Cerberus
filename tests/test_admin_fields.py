@@ -146,3 +146,43 @@ async def test_stage_validate_activate_loop_changes_live_behavior(env, tmp_path)
 
             active = await client.get("/admin/config/active")
             assert active.json()["providers"]["alpha"]["quota_cooldown_seconds"] == 45
+
+
+def test_version_skips_numbers_already_bound(config):
+    taken = {"cerberus-2026-07-16.2", "cerberus-2026-07-16.3", "cerberus-2026-01-01.9"}
+    updated = apply_updates(config, {"providers.alpha.quota_cooldown_seconds": 5}, taken_versions=taken)
+    assert updated.metadata.version == "cerberus-2026-07-16.4"
+
+
+def test_non_finite_number_is_a_value_error(config):
+    with pytest.raises(ValueError, match="finite"):
+        apply_updates(config, {"providers.alpha.quota_cooldown_seconds": float("inf")})
+
+
+@pytest.mark.asyncio
+async def test_restaging_after_an_abandoned_candidate_validates(env, tmp_path):
+    """Stage, validate, change your mind, stage again: the second candidate
+    must get a fresh version rather than the one the first is bound to."""
+
+    raw = raw_config("cerberus-2026-07-16.1")
+    raw["state"] = {"path": str(tmp_path / "state.sqlite3")}
+    doc = load_config_document(write_config(tmp_path, "cfg.yaml", raw))
+    app = create_app(doc, http_transport=httpx.MockTransport(ok_upstream))
+    key = "providers.alpha.quota_cooldown_seconds"
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = (await client.post("/admin/config/stage", json={"updates": {key: 100}}, headers=CSRF)).json()
+            assert (await client.post("/admin/validate", json={"path": first["path"]}, headers=CSRF)).status_code == 200
+
+            second = (await client.post("/admin/config/stage", json={"updates": {key: 200}}, headers=CSRF)).json()
+            assert second["version"] == "cerberus-2026-07-16.3"
+            validated = await client.post("/admin/validate", json={"path": second["path"]}, headers=CSRF)
+            assert validated.status_code == 200, validated.text
+
+            infinite = await client.post(
+                "/admin/config/stage",
+                content='{"updates": {"%s": Infinity}}' % key,
+                headers={**CSRF, "content-type": "application/json"},
+            )
+            assert infinite.status_code == 422

@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -115,18 +116,33 @@ def build_schema(config: CerberusConfig) -> dict[str, Any]:
     return {"sections": [_SECTION], "fields": fields, "version": config.metadata.version}
 
 
-def _next_version(current: str) -> str:
+def _next_version(current: str, taken: Iterable[str] = ()) -> str:
+    """The next unused ``.N`` under the current version's date.
+
+    Every version /admin/validate has seen is bound to its first checksum for
+    good, so numbering from the active version alone would hand a second,
+    different edit the number an abandoned candidate already holds — and every
+    later stage would collide with it too.
+    """
+
     m = _VERSION_RE.match(current)
     if m is None:
         raise ValueError(f"unrecognized version format: {current!r}")
-    return f"{m.group(1)}.{int(m.group(2)) + 1}"
+    prefix, highest = m.group(1), int(m.group(2))
+    for version in taken:
+        other = _VERSION_RE.match(version)
+        if other is not None and other.group(1) == prefix:
+            highest = max(highest, int(other.group(2)))
+    return f"{prefix}.{highest + 1}"
 
 
-def apply_updates(config: CerberusConfig, updates: dict[str, Any]) -> CerberusConfig:
+def apply_updates(
+    config: CerberusConfig, updates: dict[str, Any], *, taken_versions: Iterable[str] = ()
+) -> CerberusConfig:
     """Apply an allow-listed set of edits on top of the active config and
-    return a new, re-validated CerberusConfig with its version auto-bumped —
-    never the same version string bound to two different byte-for-byte
-    documents (the exact drift this session found and flagged earlier)."""
+    return a new, re-validated CerberusConfig with its version auto-bumped past
+    every version in ``taken_versions`` — never the same version string bound
+    to two different byte-for-byte documents."""
 
     allowed = editable_keys(config)
     rejected = set(updates) - allowed
@@ -145,6 +161,9 @@ def apply_updates(config: CerberusConfig, updates: dict[str, Any]) -> CerberusCo
             else:
                 coerced = value
             _set_path(dumped, key, coerced)
+    except OverflowError as exc:
+        # int(float("inf")): JSON accepts Infinity, and it must be a 422, not a 500
+        raise ValueError(f"{key!r} must be a finite number") from exc
     except (KeyError, TypeError) as exc:
         # allow-listed keys are built from real provider names (editable_keys),
         # so this only fires if a provider name itself contains "." — an
@@ -152,7 +171,7 @@ def apply_updates(config: CerberusConfig, updates: dict[str, Any]) -> CerberusCo
         # clean rather than let the traversal crash the request
         raise ValueError(f"cannot resolve editable field {key!r}: {exc}") from exc
     if updates:
-        dumped["metadata"]["version"] = _next_version(config.metadata.version)
+        dumped["metadata"]["version"] = _next_version(config.metadata.version, taken_versions)
     return CerberusConfig.model_validate(dumped)
 
 
