@@ -737,7 +737,7 @@ async def test_history_is_rendered_from_the_event_never_from_current_route_state
     app = make_app(monkeypatch, tmp_path)
     script = (await fetch(app, "/admin/ui/app.js")).text
 
-    for name in ("attemptLadder", "exclusionList", "fusionEvidence", "decisionInspector"):
+    for name in ("attemptLadder", "exclusionList", "fusionEvidence", "jevRouterEvidence", "decisionInspector"):
         source = _function_source(script, name)
         for current in ("STATE.routes", "projectedAliases", "aliasRoutable", "STATE.status"):
             assert current not in source, f"{name} must not explain history with current state: {current}"

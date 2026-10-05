@@ -73,6 +73,28 @@ Requirements and caveats:
 - Per-seat persona prompts from the earlier bundled worker are not available;
   the panel answers the caller's prompt directly.
 
+## Jev Router
+
+A `jev-router` alias uses
+[OpenRouter's Jev Router](https://openrouter.ai/typesafe/jev-router)
+as one model-selection strategy under Cerberus policy. Cerberus owns the pool:
+the alias's candidates, exact registry slugs under one OpenRouter credential,
+filtered before every request by cost, provider health, cooldowns and credential
+presence. Only what survives is sent; Jev picks one model and its reasoning
+effort from it. Cerberus then checks the router's own metadata and withholds any
+response that left the pool — including OpenRouter's `models_ignored` fallback,
+which routes over its whole pool — while still recording the billed usage.
+
+Requirements and caveats:
+
+- An OpenRouter API key is required; the pool must share one credential.
+- Callers may send generation fields and function tools only. Model lists,
+  `plugins`, `provider`, server tools, `reasoning_effort` and unknown fields are
+  refused with 400; Jev chooses the reasoning effort.
+- Not streamed: the decision is verified before the answer is returned.
+- A withheld response has already been billed by OpenRouter.
+- The hosted router cannot choose local or non-OpenRouter providers.
+
 ## Dispatch
 
 Dispatch resolves a stable Cerberus alias through a validated, identity-scoped

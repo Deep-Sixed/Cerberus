@@ -19,6 +19,7 @@ providers:
     models:
       openrouter/free: { cost_tier: free, capabilities: [chat, tools] }
       anthropic/claude-sonnet: { cost_tier: paid, capabilities: [chat, tools, coding] }
+      google/gemini-pro: { cost_tier: paid, capabilities: [chat, tools, coding] }
 
   google:
     protocol: openai
@@ -60,6 +61,21 @@ aliases:
       allow_paid_panel: true
       judge: { provider: openrouter, credential: primary, model: openrouter/free }
       require_human_review: true
+
+  cerberus/auto:
+    mode: jev-router
+    # Jev as one model-selection strategy under Cerberus policy. Before every
+    # request Cerberus filters this pool by cost, health, cooldown and
+    # credential; OpenRouter's Jev Router then picks one model (and its
+    # reasoning effort) from what remains. Exact registry slugs only, all under
+    # one OpenRouter credential. A response from outside the pool is withheld.
+    candidates:                     # the pool; no preference order
+      - { provider: openrouter, credential: primary, model: anthropic/claude-sonnet }
+      - { provider: openrouter, credential: primary, model: google/gemini-pro }
+    jev_router:
+      backend: openrouter
+      timeout_seconds: 120
+      allow_paid_pool: true         # Jev often picks a paid model; opt in explicitly
 
 identities:
   example-reader:
