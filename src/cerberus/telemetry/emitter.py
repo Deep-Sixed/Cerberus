@@ -17,7 +17,7 @@ from ..registry.schema import TelemetryConfig
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 AttemptOutcome = Literal[
     "missing_credentials",
     "transport_error",
@@ -25,6 +25,9 @@ AttemptOutcome = Literal[
     "response",
     "invalid_response",
     "stream_interrupted",
+    # a managed router answered, but with a model outside the pool Cerberus sent
+    # it (or without the evidence to show otherwise); the response is withheld
+    "out_of_policy",
 ]
 RoutingOutcome = Literal[
     "success",
@@ -34,6 +37,9 @@ RoutingOutcome = Literal[
     "unauthorized",
     "shadow",
     "fusion_unavailable",  # fusion backend unreachable/unconfigured — fusion aliases fail closed
+    "jev_router_unavailable",  # Jev Router backend unreachable/unconfigured — jev-router aliases fail closed
+    "out_of_policy",  # a managed router served outside the Cerberus pool; response withheld
+    "invalid_request",  # the caller sent a field the alias does not accept; nothing went upstream
 ]
 
 
@@ -82,6 +88,9 @@ class RoutingEvent:
     # it vouched for in return (backend name, requested panel/analyst, returned
     # model, backend generation id, router metadata). None outside fusion mode.
     fusion: dict[str, Any] | None = None
+    # jev-router only: the pool Cerberus sent, what the router reported choosing,
+    # and why a response was withheld when it was. None outside jev-router mode.
+    jev_router: dict[str, Any] | None = None
     schema_version: int = SCHEMA_VERSION
 
     def as_payload(self) -> dict[str, Any]:
@@ -91,6 +100,7 @@ class RoutingEvent:
             "alias": self.alias,
             "reasoning_effort": self.reasoning_effort,
             "fusion": self.fusion,
+            "jev_router": self.jev_router,
             "identity": self.identity,
             "config_version": self.config_version,
             "config_checksum": self.config_checksum,

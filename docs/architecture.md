@@ -6,6 +6,9 @@ client → cerberus-api → identity + alias authorization + cost policy
                      → Fusion backend → OpenRouter /chat/completions
                                       → openrouter:fusion server tool → panel models
                                       → analyst → final response
+                     → filtered pool → Jev Router → OpenRouter /chat/completions
+                                      → typesafe/jev-router chooses one pool model
+                                      → decision verified against the pool → response
 ```
 
 Cerberus owns routing policy, identity authorization, configured free/paid
@@ -23,6 +26,52 @@ authorized against the caller's identity and alias policy, under the credential
 the alias names. A caller cannot select the panel, the analyst, or the tool
 surface of a fusion request, and cannot reach the backend except through a
 fusion alias it is allowed to use. Fusion-mode deliberation is not streamed.
+
+## Jev Router
+
+A `jev-router` alias makes Jev one model-selection strategy beside dedicated
+paths and Fusion; it does not hand Cerberus's policy to it. Cerberus answers
+"what may run?" and Jev answers "which of those should run?" for one request.
+
+The pool is the alias's candidates, each an exact registry slug under one
+OpenRouter credential. Before every request `router/pool.py` filters it in the
+failover loop's own order — cost (a paid member needs `allow_paid_pool`), then
+provider health, the most specific active cooldown, and credential presence —
+and only the survivors are sent, as the `jev-router` plugin's `models` list on a
+`typesafe/jev-router` call. An empty pool is never sent: the plugin treats an
+include list that matches nothing as no list and routes over OpenRouter's whole
+pool, so Cerberus answers 503 instead. Patterns (`*`, `~family`) are refused at
+validation for the same reason.
+
+Every call asks for router metadata, and the response is accepted only when the
+`jev-router` stage is present, reports no `list_fallback`, and names a served
+model and resolved models that are all in the pool sent (a slug also matches its
+`-YYYYMMDD` revisions, as the plugin documents). Anything else — `models_ignored`
+above all — is withheld with 502 and recorded as `out_of_policy`. The call has
+already run and been billed, so its usage and reported cost are still recorded.
+The metadata is removed from the payload; the router's decision is reported in
+the `cerberus` envelope and the `jev_router` telemetry record instead.
+
+A jev-router request accepts an allowlist of caller fields, not a denylist:
+messages, sampling and output controls, and function tools. Anything else is
+refused with 400 before any upstream call, including model fallback lists,
+`route`, `plugins`, `preset`, `provider`, server tools and any field this
+release does not know. `reasoning_effort` and `reasoning` are refused because
+Jev chooses the effort; a per-candidate reasoning budget is refused at
+validation for the same reason. Jev Router requests are not streamed, because
+the decision has to be checked before any of the answer reaches the caller.
+
+`/admin/routes` projects the alias as a pool with no preference order: each
+member is `eligible` (in the pool the next request would send) or `excluded`
+with the first filter that refused it, from the same `resolve_pool` dispatch
+calls. Readiness is the backend's presence and a non-empty pool.
+
+The hosted router can only choose among models one OpenRouter credential
+reaches; it cannot place a request on a local or non-OpenRouter provider. A
+native strategy in which Cerberus asks Jev for a decision over every eligible
+backend and executes the winner itself is the intended next step, and would
+reuse the same pool filter. There is no per-request cost ceiling: Cerberus does
+not hold model prices, and a ceiling checked after a routed call is too late.
 
 ## Dispatch control plane
 

@@ -10,12 +10,19 @@ in a browser. This module calls the deciders and arranges what they return:
     runtime_exclusion()    health, then cooldown, then credential presence
     authorization_error()  whether a configured identity may use the alias
     fusion_readiness()     backend, credential and provider gates for fusion
+    resolve_pool()         the filtered pool a jev-router request would send
+    jev_router_readiness() backend presence and a non-empty pool
 
 Fusion is projected differently on purpose. Its panel never enters the failover
 loop — Cerberus resolves one backend, one credential and one provider and sends
 a single deliberation request — so panel members carry no eligibility, standby
 or cooldown state. Calling them "eligible" would describe a loop that does not
 run. They are a service chain with one readiness verdict over the whole alias.
+
+A jev-router alias is a pool, not a ladder: Jev chooses among its members, so
+none is preferred over another and there is no standby. Each member is either in
+the pool the next request would send (eligible) or filtered out before Jev sees
+it (excluded, with the first filter that refused it).
 
 Read-only: no upstream connection, no cooldown applied, no lifecycle state, and
 no secret value or credential locator — a path names its credential, never where
@@ -29,10 +36,13 @@ from typing import Any
 
 from cerberus.fusion.dispatch import fusion_readiness
 from cerberus.identity.auth import IdentityContext, authorization_error
+from cerberus.jev_router.backend import JEV_ROUTER_MODEL
+from cerberus.jev_router.dispatch import jev_router_readiness
 from cerberus.registry.loader import ConfigDocument
 from cerberus.registry.schema import Alias, CerberusConfig, Candidate
 from cerberus.router.availability import runtime_exclusion
 from cerberus.router.engine import Target, cost_eligible, ordered_targets
+from cerberus.router.pool import resolve_pool
 
 # a path is eligible when the router would attempt it first, standby when it is
 # attemptable but a later preference, excluded when the router would skip it
@@ -155,12 +165,51 @@ def _fusion(
     }
 
 
+def _jev_router(
+    config: CerberusConfig,
+    alias_name: str,
+    alias: Alias,
+    *,
+    backend_names: Collection[str],
+    control_plane: Any | None,
+    store: Any,
+    now: float | None,
+) -> dict[str, Any]:
+    assert alias.jev_router is not None
+    policy = alias.jev_router
+    members = resolve_pool(
+        config, alias_name, allow_paid=policy.allow_paid_pool, control_plane=control_plane, store=store, now=now
+    )
+    pool = [
+        _path(
+            ordinal,
+            member.target,
+            STATE_EXCLUDED if member.exclusion is not None else STATE_ELIGIBLE,
+            (
+                {"reason": member.exclusion.reason, "scope": member.exclusion.scope, "retry_at": member.exclusion.retry_at}
+                if member.exclusion is not None
+                else None
+            ),
+        )
+        for ordinal, member in enumerate(members)
+    ]
+    return {
+        "backend": policy.backend,
+        "router_model": JEV_ROUTER_MODEL,
+        "allow_paid_pool": policy.allow_paid_pool,
+        "timeout_seconds": policy.timeout_seconds,
+        "pool": pool,
+        "readiness": jev_router_readiness(members, policy, backend_names=backend_names),
+    }
+
+
 def route_projection(
     document: ConfigDocument,
     *,
     control_plane: Any | None,
     store: Any,
     backend_names: Collection[str] = (),
+    jev_router_backend_names: Collection[str] = (),
     now: float | None = None,
 ) -> dict[str, Any]:
     """The active revision's routes, with every state decided server-side."""
@@ -176,6 +225,16 @@ def route_projection(
         if alias.mode == "fusion":
             projected["fusion"] = _fusion(
                 config, alias, backend_names=backend_names, control_plane=control_plane
+            )
+        elif alias.mode == "jev-router":
+            projected["jev_router"] = _jev_router(
+                config,
+                alias_name,
+                alias,
+                backend_names=jev_router_backend_names,
+                control_plane=control_plane,
+                store=store,
+                now=now,
             )
         else:
             projected["allow_paid_fallback"] = alias.allow_paid_fallback

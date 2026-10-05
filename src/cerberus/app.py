@@ -44,9 +44,11 @@ from cerberus.identity import (
     resolve_identity,
     supplied_credential,
 )
+from cerberus.caller_fields import non_function_tools
 from cerberus.fusion import FusionBackend, OpenRouterFusionBackend, fusion_dispatch, fusion_status
 from cerberus.identity.session_store import InMemorySessionStore, SqliteSessionStore
 from cerberus.identity.sso import AdminSSO
+from cerberus.jev_router import JevRouterBackend, OpenRouterJevRouterBackend, jev_router_dispatch
 from cerberus.registry import CerberusConfig, ConfigDocument, load_config_document
 from cerberus.registry.schema import Alias, Candidate
 from cerberus.router.dispatch import dispatch, shadow_decision_event, unauthorized_event
@@ -182,6 +184,7 @@ def create_app(
     jwks_transport: httpx.AsyncBaseTransport | None = None,
     fusion_transport: httpx.AsyncBaseTransport | None = None,
     sso_transport: httpx.AsyncBaseTransport | None = None,
+    jev_router_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     if config is None:
         document = load_config_document()
@@ -230,6 +233,11 @@ def create_app(
     # Managed deliberation backends, keyed by FusionPolicy.backend. Fixed at boot
     # like the telemetry sink; an alias whose backend is absent fails closed.
     fusion_backends: dict[str, FusionBackend] = {"openrouter": OpenRouterFusionBackend(fusion_transport)}
+    # Managed model-selection routers, keyed by JevRouterPolicy.backend; fixed at
+    # boot the same way.
+    jev_router_backends: dict[str, JevRouterBackend] = {
+        "openrouter": OpenRouterJevRouterBackend(jev_router_transport)
+    }
     if boot_config.admin_sso is not None:
         # sessions + pending logins share the state DB when one is configured, so
         # they survive restarts and are consistent across workers; else in-memory
@@ -249,6 +257,8 @@ def create_app(
             await app.state.http_client.aclose()
             for backend in fusion_backends.values():
                 await backend.aclose()
+            for router in jev_router_backends.values():
+                await router.aclose()
             if verifier is not None:
                 await verifier.aclose()
             if admin_sso is not None:
@@ -676,7 +686,8 @@ def create_app(
         with the real one. This answers with the router's own verdicts: the same
         cost gate, the same health/cooldown/credential order the failover loop
         walks, the same authorization predicate the inference path applies, and
-        the same three gates fusion dispatch refuses on.
+        the same three gates fusion dispatch refuses on, and the same filtered
+        pool a jev-router request would send.
 
         Read-only, and behind the same boundary as /admin/status: the projection
         names every provider, model and credential reference in the revision, so
@@ -693,6 +704,7 @@ def create_app(
                 control_plane=control_plane,
                 store=store,
                 backend_names=fusion_backends.keys(),
+                jev_router_backend_names=jev_router_backends.keys(),
             ),
             headers=_ADMIN_UI_HEADERS,
         )
@@ -955,6 +967,22 @@ def create_app(
                         status_code=403,
                         content={"error": {"message": f"Identity not authorized for {alias_name!r}", "reason": denial}},
                     )
+        if alias.mode not in ("fusion", "jev-router"):
+            # fusion rejects caller tools outright (fusion_dispatch) and
+            # jev-router refuses anything outside its own allowlist
+            # (jev_router_dispatch), each with a routing event; elsewhere only
+            # function tools are forwarded
+            server_tools = non_function_tools(body)
+            if server_tools:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "message": f"Only function tools are accepted; got {', '.join(sorted(set(server_tools)))}",
+                            "reason": "unsupported_tool",
+                        }
+                    },
+                )
         shadow = lifecycle.shadow
         if shadow is not None:
             shadow_event = shadow_decision_event(
@@ -975,6 +1003,20 @@ def create_app(
                 identity_name=context.name if context else None,
                 document=document,
                 backends=fusion_backends,
+                telemetry=telemetry,
+                control_plane=control_plane,
+            )
+        if alias.mode == "jev-router":
+            # Cerberus filters the pool; Jev picks within it. A router outage
+            # fails only jev-router aliases.
+            return await jev_router_dispatch(
+                body=body,
+                alias_name=alias_name,
+                alias=alias,
+                identity_name=context.name if context else None,
+                document=document,
+                backends=jev_router_backends,
+                store=store,
                 telemetry=telemetry,
                 control_plane=control_plane,
             )
