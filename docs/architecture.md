@@ -107,9 +107,23 @@ error, an unreadable response, an absent or unknown choice — runs the request 
 configured order instead, which every pool member already satisfies; the alias
 stays routable while no decision can be had.
 
+With `jev.reasoning_efforts` set, the same call asks a second question: how much
+reasoning effort the request needs, answered from that list only. The answer
+replaces the configured `reasoning_effort` of every planned candidate that sets
+one, and is never added to a candidate that sets none, because a route without
+one may not accept the parameter at all; the list is how an operator keeps Jev
+to values every such route accepts. The egress rule is unchanged: a caller's own
+stated effort wins unless the candidate sets `reasoning_effort_override`. The
+effort is vetted on its own — an answer outside the list leaves the configured
+effort standing, whatever the model answer was — and with one model left the
+call is still made for the effort alone. A plan may change the effort of a
+target that sets one and nothing else about it; the dispatch loop refuses any
+other difference from a configured target.
+
 Each routing event carries a `jev` record: options offered, whether the decision
 was `chosen`, `skipped` or a `fallback`, the reason, the choice and its
-probability, decision latency, status and usage. It never carries request text.
+probability, the effort applied with its probability or why none was, decision
+latency, status and usage. It never carries request text.
 The confirmed Decisions API contract covers the endpoint, the model, the
 `model`/`state`/`questions` request and `answers` keyed by question id; the
 fields inside one question and one answer are not yet confirmed, so the answer

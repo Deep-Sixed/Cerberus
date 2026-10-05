@@ -87,7 +87,8 @@ aliases:
     # first through its own failover loop. No usable answer -> configured order.
     candidates:                     # configured order is the fallback order
       - { provider: google, credential: free-1, model: gemini-flash }
-      - { provider: openrouter, credential: primary, model: anthropic/claude-sonnet }
+      # a candidate that sets reasoning_effort is one Jev's effort answer may replace
+      - { provider: openrouter, credential: primary, model: anthropic/claude-sonnet, reasoning_effort: medium }
     jev:
       decider: { provider: openrouter, credential: primary }
       model: typesafe/jev-1.13      # pinned; bump deliberately after testing
@@ -95,6 +96,7 @@ aliases:
       max_input_chars: 4000
       timeout_seconds: 5            # decision deadline; then configured order
       allow_paid_pool: true
+      reasoning_efforts: [low, medium, high]   # also ask Jev for an effort, among these only
 
 identities:
   example-reader:

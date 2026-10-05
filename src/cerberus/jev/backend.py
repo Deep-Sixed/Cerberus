@@ -1,8 +1,9 @@
 """Decision-service seam plus the OpenRouter Decisions API implementation.
 
-A jev alias asks one bounded question — which pool model should serve this
-request — and gets back one of the option ids it offered, or nothing usable.
-Nothing outside this module knows the wire shape of a decision service.
+A jev alias asks bounded questions in one call — which pool model should serve
+this request and, when its policy says so, how much reasoning effort the request
+needs — and gets back, per question, one of the options it offered or nothing
+usable. Nothing outside this module knows the wire shape of a decision service.
 
 Confirmed contract for OpenRouter's Decisions API: ``POST /api/alpha/decisions``
 with a bearer key; the body carries ``model``, ``state`` and ``questions``;
@@ -10,9 +11,9 @@ Jev answers ``choice``, ``noul`` and ``score`` questions; the response carries
 ``answers`` keyed by question id, with typed results and probabilities, and
 ``usage``. The field names inside one question and one answer are not yet
 confirmed, so the request uses the plainest form and the answer is read
-tolerantly. A misread can only ever produce "no usable answer", because the
-choice must equal an option id Cerberus sent; the request then runs in
-configured order, which every pool member already satisfies.
+tolerantly. A misread can only ever produce "no usable answer", because each
+choice must equal an option Cerberus sent; the request then runs in configured
+order and configured effort, which policy already allows.
 """
 
 from __future__ import annotations
@@ -26,15 +27,24 @@ import httpx
 
 DecisionFailure = Literal["timeout", "unreachable", "http_error", "invalid_response"]
 
-# the one question a jev alias asks, by id
+# the questions a jev alias asks, by id
 ROUTE_QUESTION_ID = "route"
 ROUTE_QUESTION = (
     "Which candidate model is the least costly one that is still strong enough "
     "to handle this request well?"
 )
+EFFORT_QUESTION_ID = "effort"
+EFFORT_QUESTION = "How much reasoning effort should the chosen model spend on this request?"
 # keys an answer's chosen option may sit under, most specific first
 _CHOICE_KEYS = ("choice", "result", "value", "answer", "selected")
 _USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "cost")
+
+
+@dataclass(frozen=True, slots=True)
+class Question:
+    id: str
+    question: str
+    options: list[str]  # opaque model ids or effort levels; never a provider name
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,14 +53,19 @@ class DecisionRequest:
     api_key: str
     model: str
     state: str  # everything the decision service may read, already scoped by policy
-    options: list[str]  # opaque option ids; never a provider name
+    questions: list[Question]
     timeout_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
-class Decision:
-    choice: str | None  # an option id exactly as answered, or None when absent
+class Answer:
+    choice: str | None  # exactly as answered, or None when absent; not yet vetted
     confidence: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class Decision:
+    answers: dict[str, Answer]  # one per question asked, keyed by question id
     usage: dict[str, float] | None
     http_status: int
     latency_ms: float
@@ -86,12 +101,8 @@ class OpenRouterJevDecider:
             "model": request.model,
             "state": request.state,
             "questions": [
-                {
-                    "id": ROUTE_QUESTION_ID,
-                    "type": "choice",
-                    "question": ROUTE_QUESTION,
-                    "options": list(request.options),
-                }
+                {"id": q.id, "type": "choice", "question": q.question, "options": list(q.options)}
+                for q in request.questions
             ],
         }
 
@@ -125,10 +136,9 @@ class OpenRouterJevDecider:
         if not isinstance(payload, dict):
             raise DecisionError("invalid_response", latency_ms=elapsed(), http_status=response.status_code)
 
-        choice, confidence = _route_answer(payload.get("answers"))
+        answers = payload.get("answers")
         return Decision(
-            choice=choice,
-            confidence=confidence,
+            answers={q.id: Answer(*_answer(answers, q.id)) for q in request.questions},
             usage=_usage(payload.get("usage")),
             http_status=response.status_code,
             latency_ms=elapsed(),
@@ -138,13 +148,13 @@ class OpenRouterJevDecider:
         await self._client.aclose()
 
 
-def _route_answer(answers: Any) -> tuple[str | None, float | None]:
-    """The chosen option and its probability from the route answer, if present."""
+def _answer(answers: Any, question_id: str) -> tuple[str | None, float | None]:
+    """The chosen option and its probability for one question, if present."""
 
     if isinstance(answers, list):
-        answer = next((a for a in answers if isinstance(a, dict) and a.get("id") == ROUTE_QUESTION_ID), None)
+        answer = next((a for a in answers if isinstance(a, dict) and a.get("id") == question_id), None)
     elif isinstance(answers, dict):
-        answer = answers.get(ROUTE_QUESTION_ID)
+        answer = answers.get(question_id)
     else:
         return None, None
     if isinstance(answer, str):

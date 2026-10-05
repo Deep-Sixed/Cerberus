@@ -246,6 +246,7 @@ def _jev(
             "credential_ref": policy.decider.credential,
             "model": policy.model,
             "input": policy.input,
+            "reasoning_efforts": policy.reasoning_efforts,
             "max_input_chars": policy.max_input_chars,
             "timeout_seconds": policy.timeout_seconds,
             "readiness": decider_readiness(

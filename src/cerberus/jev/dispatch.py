@@ -4,6 +4,7 @@
       → cost, health, cooldown, credential       router/pool.py
       → distinct models offered under opaque ids  jev/state.py
       → one decision: which is cheapest-sufficient jev/backend.py
+        (and, by policy, how much reasoning effort)
       → chosen model first, rest in config order  DispatchPlan
       → the ordinary failover loop executes       router/dispatch.py
 
@@ -11,23 +12,40 @@ Jev never executes anything and never widens the pool: its answer can only
 reorder models policy already admitted. Any failure to get a usable answer —
 no credential, timeout, transport or HTTP error, an unreadable response, a
 choice that is not an offered id — runs the request in configured order and
-records why. With one model or none left to choose from, no decision is asked.
+records why. With one model or none left to choose from, no model is asked
+for; with no effort question either, no decision call is made at all.
+
+The effort answer, when policy asks for one, replaces the configured
+reasoning_effort of every planned candidate that sets one, and of no other. The
+egress keeps its rule that a caller's own stated effort wins unless the
+candidate sets reasoning_effort_override.
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Collection
+from dataclasses import replace
 from typing import Any
 
 # cerberus.router before anything importing cerberus.egress: egress.client
 # imports router.engine, and the router package imports egress.client in turn
 from cerberus.router.dispatch import DispatchPlan, dispatch
+from cerberus.router.engine import Target
 from cerberus.router.pool import PoolMember, resolve_pool
-from cerberus.jev.backend import DecisionBackend, DecisionError, DecisionRequest
+from cerberus.jev.backend import (
+    EFFORT_QUESTION,
+    EFFORT_QUESTION_ID,
+    ROUTE_QUESTION,
+    ROUTE_QUESTION_ID,
+    DecisionBackend,
+    DecisionError,
+    DecisionRequest,
+    Question,
+)
 from cerberus.jev.state import Option, decision_state, options_for
 from cerberus.registry.loader import ConfigDocument
-from cerberus.registry.schema import Alias, CerberusConfig
+from cerberus.registry.schema import Alias, CerberusConfig, JevPolicy
 
 COST_REFUSAL = "paid_pool_prohibited"
 
@@ -98,7 +116,8 @@ async def jev_dispatch(
         for member in members
         if _cost_refused(member) and member.exclusion is not None
     ]
-    options = options_for([member.target for member in members if member.exclusion is None])
+    attemptable = [member.target for member in members if member.exclusion is None]
+    options = options_for(attemptable)
 
     record: dict[str, Any] = {
         "decider": policy.backend,
@@ -109,17 +128,24 @@ async def jev_dispatch(
         "reason": None,
         "choice": None,
         "confidence": None,
+        "effort": None,  # the reasoning effort Jev chose and Cerberus applied
+        "effort_confidence": None,
+        "effort_reason": None,  # why no effort was applied, when none was
         "latency_ms": None,
         "http_status": None,
         "usage": None,
     }
-    chosen = await _decide(body, options, config, alias, policy, backends, control_plane, record)
+    chosen, effort = await _decide(body, options, attemptable, config, alias, policy, backends, control_plane, record)
 
     if chosen is None:
         order = admitted
     else:
         first = [t for t in admitted if (t.provider_id, t.model) == (chosen.provider, chosen.model)]
         order = first + [t for t in admitted if (t.provider_id, t.model) != (chosen.provider, chosen.model)]
+    if effort is not None:
+        # only where the route already sets an effort: a route without one may
+        # not accept the parameter at all
+        order = [replace(t, reasoning_effort=effort) if t.reasoning_effort is not None else t for t in order]
 
     return await dispatch(
         body=body,
@@ -137,59 +163,83 @@ async def jev_dispatch(
 async def _decide(
     body: dict[str, Any],
     options: list[Option],
+    attemptable: list[Target],
     config: CerberusConfig,
     alias: Alias,
-    policy: Any,
+    policy: JevPolicy,
     backends: dict[str, DecisionBackend],
     control_plane: Any | None,
     record: dict[str, Any],
-) -> Option | None:
-    """The option Jev chose, or None with ``record`` saying why there is none."""
+) -> tuple[Option | None, str | None]:
+    """The model and the effort Jev chose, each None with ``record`` saying why.
 
-    def without(decision: str, reason: str) -> None:
-        record.update(decision=decision, reason=reason)
+    The model is asked for only with two or more to choose between, and the
+    effort only when policy lists efforts and an attemptable candidate sets
+    one for it to replace. With neither to ask, no call is made and no request
+    text leaves.
+    """
 
-    if len(options) <= 1:
-        # nothing to choose between: no request text leaves for a decision
-        without("skipped", "single_option" if options else "no_option")
-        return None
+    ask_route = len(options) > 1
+    ask_effort = policy.reasoning_efforts is not None and any(t.reasoning_effort is not None for t in attemptable)
+    if not ask_route:
+        record.update(decision="skipped", reason="single_option" if options else "no_option")
+    if not ask_effort:
+        record["effort_reason"] = "not_requested" if policy.reasoning_efforts is None else "not_applicable"
+    if not (ask_route or ask_effort):
+        return None, None
+
+    def failed(reason: str) -> tuple[None, None]:
+        if ask_route:
+            record.update(decision="fallback", reason=reason)
+        if ask_effort:
+            record["effort_reason"] = reason
+        return None, None
+
     readiness = decider_readiness(config, alias, backend_names=backends.keys(), control_plane=control_plane)
     if not readiness["backend_present"]:
-        without("fallback", "backend_missing")
-        return None
+        return failed("backend_missing")
     if not readiness["credential_present"]:
-        without("fallback", "credential_missing")
-        return None
+        return failed("credential_missing")
     if not readiness["provider_available"]:
-        without("fallback", "decider_unavailable")
-        return None
+        return failed("decider_unavailable")
 
+    questions = []
+    if ask_route:
+        questions.append(Question(ROUTE_QUESTION_ID, ROUTE_QUESTION, [option.id for option in options]))
+    if ask_effort:
+        assert policy.reasoning_efforts is not None
+        questions.append(Question(EFFORT_QUESTION_ID, EFFORT_QUESTION, list(policy.reasoning_efforts)))
     request = DecisionRequest(
         endpoint=str(policy.endpoint),
         api_key=_decider_key(config, alias),
         model=policy.model,
         state=decision_state(body, options, config, input_mode=policy.input, max_chars=policy.max_input_chars),
-        options=[option.id for option in options],
+        questions=questions,
         timeout_seconds=float(policy.timeout_seconds),
     )
     try:
         decision = await backends[policy.backend].decide(request)
     except DecisionError as exc:
         record.update(latency_ms=round(exc.latency_ms, 3), http_status=exc.http_status)
-        without("fallback", exc.reason)
-        return None
+        return failed(exc.reason)
+    record.update(latency_ms=round(decision.latency_ms, 3), http_status=decision.http_status, usage=decision.usage)
 
-    record.update(
-        latency_ms=round(decision.latency_ms, 3),
-        http_status=decision.http_status,
-        usage=decision.usage,
-        confidence=decision.confidence,
-    )
-    chosen = next((option for option in options if option.id == decision.choice), None)
-    if chosen is None:
-        # absent, or not an id Cerberus offered: never guessed at
-        without("fallback", "choice_outside_pool" if decision.choice is not None else "no_choice")
-        record["confidence"] = None
-        return None
-    record.update(decision="chosen", choice=chosen.label)
-    return chosen
+    # Each answer is vetted on its own and never guessed at: it must be exactly
+    # an option Cerberus offered for that question.
+    chosen = None
+    if ask_route:
+        answer = decision.answers[ROUTE_QUESTION_ID]
+        chosen = next((option for option in options if option.id == answer.choice), None)
+        if chosen is None:
+            record.update(decision="fallback", reason="choice_outside_pool" if answer.choice is not None else "no_choice")
+        else:
+            record.update(decision="chosen", choice=chosen.label, confidence=answer.confidence)
+    effort = None
+    if ask_effort:
+        answer = decision.answers[EFFORT_QUESTION_ID]
+        if answer.choice in (policy.reasoning_efforts or []):
+            effort = answer.choice
+            record.update(effort=effort, effort_confidence=answer.confidence)
+        else:
+            record["effort_reason"] = "choice_outside_options" if answer.choice is not None else "no_choice"
+    return chosen, effort

@@ -14,8 +14,8 @@ import httpx
 import pytest
 
 from cerberus.app import create_app
-from cerberus.jev import DecisionRequest, OpenRouterJevDecider
-from cerberus.jev.backend import _route_answer
+from cerberus.jev import DecisionRequest, OpenRouterJevDecider, Question
+from cerberus.jev.backend import _answer
 from cerberus.registry import load_config_document
 from tests.test_control import write_config
 
@@ -244,6 +244,9 @@ async def test_the_chosen_model_runs_first_through_cerberus(monkeypatch, tmp_pat
         "reason": None,
         "choice": "openrouter/anthropic/claude-sonnet",
         "confidence": 0.91,
+        "effort": None,
+        "effort_confidence": None,
+        "effort_reason": "not_requested",
         "latency_ms": event["jev"]["latency_ms"],
         "http_status": 200,
         "usage": {"prompt_tokens": 120, "completion_tokens": 1, "total_tokens": 121, "cost": 0.00004},
@@ -446,10 +449,18 @@ async def test_revision_materializes_the_jev_pool(monkeypatch, tmp_path):
 
 def test_decider_builds_the_documented_body():
     request = DecisionRequest(endpoint="https://openrouter.ai/api/alpha/decisions", api_key="k",
-                              model="typesafe/jev-1.13", state="s", options=["m1", "m2"], timeout_seconds=5)
+                              model="typesafe/jev-1.13", state="s",
+                              questions=[Question("route", "q?", ["m1", "m2"]), Question("effort", "e?", ["low", "high"])],
+                              timeout_seconds=5)
     body = OpenRouterJevDecider.build_body(request)
-    assert body["model"] == "typesafe/jev-1.13" and body["state"] == "s"
-    assert body["questions"][0]["options"] == ["m1", "m2"] and body["questions"][0]["type"] == "choice"
+    assert body == {
+        "model": "typesafe/jev-1.13",
+        "state": "s",
+        "questions": [
+            {"id": "route", "type": "choice", "question": "q?", "options": ["m1", "m2"]},
+            {"id": "effort", "type": "choice", "question": "e?", "options": ["low", "high"]},
+        ],
+    }
 
 
 @pytest.mark.parametrize(
@@ -467,7 +478,7 @@ def test_decider_builds_the_documented_body():
     ],
 )
 def test_the_route_answer_is_read_tolerantly(answers, expected):
-    assert _route_answer(answers) == expected
+    assert _answer(answers, "route") == expected
 
 
 @pytest.mark.asyncio
@@ -487,3 +498,168 @@ async def test_a_plan_cannot_add_a_target_the_alias_does_not_configure(monkeypat
             plan=DispatchPlan(targets=[stranger], exclusions=[], jev={}),
         )
     assert upstream.requests == []
+
+
+# ---- the second question: reasoning effort ----
+
+EFFORTS = ["low", "medium", "high"]
+
+
+def effort_raw(**jev) -> dict:
+    """The frontier candidate sets an effort for Jev's answer to replace; the
+    others set none, so nothing may be added to them."""
+    raw = jev_raw(jev={"reasoning_efforts": EFFORTS, **jev})
+    for candidate in raw["aliases"]["cerberus/smart"]["candidates"]:
+        if candidate["model"] == FRONTIER[1]:
+            candidate["reasoning_effort"] = "medium"
+    return raw
+
+
+def decides(route="m3", effort="high"):
+    answers = {}
+    if route is not None:
+        answers["route"] = {"choice": route, "probabilities": {route: 0.8}}
+    if effort is not None:
+        answers["effort"] = {"choice": effort, "probabilities": {effort: 0.7}}
+    return answer({"answers": answers, "usage": {"total_tokens": 130}})
+
+
+def sent_effort(upstream, index=0):
+    return json.loads(upstream.requests[index].content).get("reasoning_effort")
+
+
+@pytest.mark.asyncio
+async def test_effort_is_a_second_question_in_the_same_call(monkeypatch, tmp_path):
+    app, decisions, _ = make_app(monkeypatch, tmp_path, raw=effort_raw(), decide=decides())
+    await call(app)
+
+    assert len(decisions.requests) == 1
+    assert [q["id"] for q in decisions.body["questions"]] == ["route", "effort"]
+    assert decisions.body["questions"][1] == {
+        "id": "effort",
+        "type": "choice",
+        "question": "How much reasoning effort should the chosen model spend on this request?",
+        "options": EFFORTS,
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_effort_answer_replaces_a_configured_effort(monkeypatch, tmp_path):
+    app, _, upstream = make_app(monkeypatch, tmp_path, raw=effort_raw(), decide=decides("m3", "high"))
+    resp, events = await call(app)
+
+    assert resp.status_code == 200
+    assert upstream.models() == ["anthropic/claude-sonnet"]
+    assert sent_effort(upstream) == "high", "Jev's answer, not the configured medium"
+    event = events[0]
+    assert event["reasoning_effort"] == "high"
+    assert (event["jev"]["effort"], event["jev"]["effort_confidence"], event["jev"]["effort_reason"]) == ("high", 0.7, None)
+    assert resp.json()["cerberus"]["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_the_effort_is_never_added_to_a_route_without_one(monkeypatch, tmp_path):
+    app, _, upstream = make_app(monkeypatch, tmp_path, raw=effort_raw(), decide=decides("m2", "high"))
+    await call(app)
+    assert upstream.models() == ["vendor/mid"]
+    assert sent_effort(upstream) is None, "a route without an effort may not accept the parameter"
+
+
+@pytest.mark.asyncio
+async def test_a_caller_stated_effort_still_wins(monkeypatch, tmp_path):
+    app, _, upstream = make_app(monkeypatch, tmp_path, raw=effort_raw(), decide=decides("m3", "high"))
+    await call(app, {**REQ, "reasoning_effort": "low"})
+    assert sent_effort(upstream) == "low"
+
+
+@pytest.mark.parametrize("effort", ["maximum", "minimal"], ids=["unknown", "not-in-policy"])
+@pytest.mark.asyncio
+async def test_an_effort_outside_the_options_is_never_applied(monkeypatch, tmp_path, effort):
+    app, _, upstream = make_app(monkeypatch, tmp_path, raw=effort_raw(), decide=decides("m3", effort))
+    _, events = await call(app)
+    assert sent_effort(upstream) == "medium", "the configured effort stands"
+    record = events[0]["jev"]
+    assert (record["decision"], record["effort"], record["effort_reason"]) == ("chosen", None, "choice_outside_options")
+
+
+@pytest.mark.asyncio
+async def test_a_missing_effort_answer_leaves_the_route_choice_standing(monkeypatch, tmp_path):
+    app, _, upstream = make_app(monkeypatch, tmp_path, raw=effort_raw(), decide=decides("m3", None))
+    _, events = await call(app)
+    assert upstream.models() == ["anthropic/claude-sonnet"] and sent_effort(upstream) == "medium"
+    assert (events[0]["jev"]["decision"], events[0]["jev"]["effort_reason"]) == ("chosen", "no_choice")
+
+
+@pytest.mark.asyncio
+async def test_effort_alone_is_asked_when_one_model_is_left(monkeypatch, tmp_path):
+    app, decisions, upstream = make_app(monkeypatch, tmp_path, raw=effort_raw(), decide=decides(None, "low"))
+    app.state.cooldowns.apply(scope="model", provider="openrouter", credential="main", model="vendor/mid",
+                              reason="quota_429", duration_seconds=600)
+    app.state.cooldowns.apply(scope="model", provider="edgebox", credential="none", model="gemma-4-12b",
+                              reason="quota_429", duration_seconds=600)
+    _, events = await call(app)
+
+    assert [q["id"] for q in decisions.body["questions"]] == ["effort"]
+    assert upstream.models() == ["anthropic/claude-sonnet"] and sent_effort(upstream) == "low"
+    record = events[0]["jev"]
+    assert (record["decision"], record["reason"], record["effort"]) == ("skipped", "single_option", "low")
+
+
+@pytest.mark.asyncio
+async def test_effort_is_not_asked_when_no_attemptable_route_sets_one(monkeypatch, tmp_path):
+    app, decisions, _ = make_app(monkeypatch, tmp_path, raw=effort_raw(), decide=decides("m1", None))
+    app.state.cooldowns.apply(scope="model", provider="openrouter", credential="main",
+                              model="anthropic/claude-sonnet", reason="quota_429", duration_seconds=600)
+    _, events = await call(app)
+    assert [q["id"] for q in decisions.body["questions"]] == ["route"]
+    assert events[0]["jev"]["effort_reason"] == "not_applicable"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_decision_records_why_no_effort_was_applied(monkeypatch, tmp_path):
+    app, _, upstream = make_app(monkeypatch, tmp_path, raw=effort_raw(), decide=answer({"error": "x"}, status=503))
+    _, events = await call(app)
+    record = events[0]["jev"]
+    assert (record["decision"], record["reason"], record["effort_reason"]) == ("fallback", "http_error", "http_error")
+    assert upstream.models() == ["gemma-4-12b"]
+
+
+@pytest.mark.asyncio
+async def test_a_plan_may_change_a_configured_effort_but_never_add_one(monkeypatch, tmp_path):
+    from dataclasses import replace
+
+    from cerberus.router.dispatch import DispatchPlan, dispatch
+    from cerberus.router.engine import ordered_targets
+
+    app, _, upstream = make_app(monkeypatch, tmp_path, raw=effort_raw())
+    document = app.state.lifecycle.active
+    local, _mid, frontier = ordered_targets(document.config, "cerberus/smart")
+
+    async def run(target):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+            return await dispatch(
+                body=REQ, alias_name="cerberus/smart", document=document, store=app.state.cooldowns,
+                client=client, telemetry=_NullTelemetry(),
+                plan=DispatchPlan(targets=[target], exclusions=[], jev={}),
+            )
+
+    with pytest.raises(ValueError, match="does not configure"):
+        await run(replace(local, reasoning_effort="high"))
+    assert upstream.requests == []
+    resp = await run(replace(frontier, reasoning_effort="high"))
+    assert resp.status_code == 200 and sent_effort(upstream) == "high"
+
+
+class _NullTelemetry:
+    def emit(self, _event):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_routes_show_which_efforts_jev_may_choose(monkeypatch, tmp_path):
+    app, _, _ = make_app(monkeypatch, tmp_path, raw=effort_raw())
+    async with app.router.lifespan_context(app):
+        async with client_for(app) as client:
+            projection = (await client.get("/admin/routes")).json()
+    entry = next(a for a in projection["aliases"] if a["alias"] == "cerberus/smart")
+    assert entry["jev"]["decider"]["reasoning_efforts"] == EFFORTS

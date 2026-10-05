@@ -13,7 +13,7 @@ import json
 import os
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -41,13 +41,30 @@ class DispatchPlan:
 
     The loop still owns everything after the order: health, cooldown and
     credential gates, failover, cooldown writes and telemetry. A plan can only
-    reorder what policy already admitted; it carries no target the alias does
-    not configure, and the cost gate it was built under is recorded with it.
+    reorder what policy already admitted, and change the reasoning effort of a
+    target that already sets one; it carries no target the alias does not
+    configure, and the cost gate it was built under is recorded with it.
     """
 
     targets: list[Target]  # attempt order, cost-gated
     exclusions: list[dict]  # what cost policy removed before ordering
     jev: dict[str, Any]  # the decision record, for telemetry and the response
+
+
+def _configured(planned: Target, targets: list[Target]) -> bool:
+    """Whether a planned target is a configured one, its reasoning effort aside
+    where the configured target sets an effort of its own."""
+
+    for target in targets:
+        if planned == target:
+            return True
+        if (
+            target.reasoning_effort is not None
+            and planned.reasoning_effort is not None
+            and replace(planned, reasoning_effort=target.reasoning_effort) == target
+        ):
+            return True
+    return False
 
 
 def _attempt(
@@ -225,7 +242,7 @@ async def dispatch(
         eligible, exclusions = cost_eligible(alias, targets)
     else:
         # a plan may only reorder what this alias configures, never add to it
-        if any(target not in targets for target in plan.targets):
+        if not all(_configured(target, targets) for target in plan.targets):
             raise ValueError(f"dispatch plan for {alias_name!r} names a target the alias does not configure")
         eligible, exclusions = list(plan.targets), list(plan.exclusions)
     jev_record = plan.jev if plan is not None else None
