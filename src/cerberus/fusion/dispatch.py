@@ -22,12 +22,15 @@ from fastapi.responses import JSONResponse
 from cerberus.fusion.backend import FusionBackend, FusionError, FusionRequest
 from cerberus.registry.loader import ConfigDocument
 from cerberus.registry.schema import Alias, CerberusConfig
+from cerberus.router.engine import CALLER_ROUTING_KEYS
 from cerberus.telemetry import RoutingAttempt, RoutingEvent, TelemetryEmitter
 
 # Caller-supplied keys a fusion alias cannot honor: the backend owns the tool
 # surface during deliberation, so accepting them would silently drop or reroute
-# the caller's intent. Rejected up front rather than forwarded.
-_REJECTED_CALLER_KEYS = ("tools", "tool_choice", "plugins")
+# the caller's intent. Rejected up front rather than forwarded. The keys every
+# alias refuses because they choose models upstream (models, route, ...) would
+# otherwise reach OpenRouter beside the deliberation, so they are refused too.
+_REJECTED_CALLER_KEYS = ("tools", "tool_choice", *CALLER_ROUTING_KEYS)
 
 
 def fusion_aliases(config: CerberusConfig) -> list[str]:

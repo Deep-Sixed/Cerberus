@@ -21,8 +21,11 @@ constitute a general billing cap or a global distributed rate limiter.
 The backend sees only what Cerberus sends it: a request Cerberus has already
 authorized against the caller's identity and alias policy, under the credential
 the alias names. A caller cannot select the panel, the analyst, or the tool
-surface of a fusion request, and cannot reach the backend except through a
-fusion alias it is allowed to use. Fusion-mode deliberation is not streamed.
+surface of a fusion request: a body carrying `tools`, `tool_choice`, or any of
+the model-selection keys every alias refuses (see Dispatch control plane) is
+answered 400 before the backend is called. A caller cannot reach the backend
+except through a fusion alias it is allowed to use. Fusion-mode deliberation is
+not streamed.
 
 ## Dispatch control plane
 
@@ -42,6 +45,23 @@ records `degraded` — never `down` — when the provider cannot be reached; rea
 per-request failures are excluded at their own scope by the cooldown store.
 Normal label lookup reads the in-memory snapshot and performs no SQL.
 Routing and usage records are written asynchronously after a decision.
+
+The request body cannot add a path either. Cerberus overwrites `model` with the
+target it selected, and refuses with a 400, before any upstream call, a body
+carrying a key an upstream reads as model selection: `models` and `route`
+(OpenRouter's fallback list), `plugins`, `preset`, or a server tool, meaning an
+entry in `tools` or a `tool_choice` whose `type` starts with `openrouter:`
+(`openrouter:fusion` names a panel and analyst of its own). Any of them would let
+a caller run, on the operator's credential, a model the pinned revision never
+named and the free/paid cost gate never weighed. The rule is
+`engine.caller_model_selection`. It applies to every alias mode and every
+provider, OpenRouter or not, because the failover loop may reach any candidate.
+Refusing rather than stripping keeps the substitution from ever being silent, as
+with `reasoning_effort_override`. The refusal is recorded as a routing event,
+outcome `upstream_error` with status 400 and no attempts, the same shape fusion
+records. Function tools, a `tool_choice` naming one, and keys that leave the
+model alone pass through unchanged. That includes `provider` preferences, which
+only choose among hosts for the model Cerberus already pinned.
 
 `/health` is the only ungated endpoint and answers liveness only —
 `{"status": "ok", "service": "cerberus"}` — which is what a container or

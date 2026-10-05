@@ -26,7 +26,7 @@ from cerberus.egress.client import (
 )
 from cerberus.registry.loader import ConfigDocument
 from cerberus.router.availability import runtime_exclusion
-from cerberus.router.engine import Target, cost_eligible, ordered_targets
+from cerberus.router.engine import Target, caller_model_selection, cost_eligible, ordered_targets
 from cerberus.state.cooldowns import InMemoryCooldownStore
 from cerberus.telemetry import RoutingAttempt, RoutingEvent, RoutingOutcome, TelemetryEmitter
 
@@ -199,6 +199,41 @@ async def dispatch(
 
     targets = ordered_targets(config, alias_name)
     ordered = [f"{t.provider_id}/{t.credential_id}/{t.model}" for t in targets]
+
+    # The pinned revision alone chooses the model. A body that would choose or
+    # add one upstream is refused before any provider sees it, whichever
+    # candidate the loop would have reached, so the refusal is never silent.
+    rejected = caller_model_selection(body)
+    if rejected:
+        telemetry.emit(
+            _event(
+                request_id=request_id,
+                alias=alias_name,
+                mode=alias.mode,
+                target=None,
+                attempts=[],
+                http_status=400,
+                outcome="upstream_error",
+                started_at=started_at,
+                usage=None,
+                streaming=streaming,
+                fallback=False,
+                identity=identity_name,
+                config_version=document.version,
+                config_checksum=document.checksum,
+                candidates=ordered,
+            )
+        )
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": f"alias does not accept caller-supplied model selection: {', '.join(rejected)}",
+                    "request_id": request_id,
+                }
+            },
+        )
+
     eligible, exclusions = cost_eligible(alias, targets)
     attempts: list[RoutingAttempt] = []
     attempted = 0

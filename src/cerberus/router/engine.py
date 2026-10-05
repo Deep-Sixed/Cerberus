@@ -1,8 +1,9 @@
-"""Deterministic target resolution and cost-tier gating.
+"""Deterministic target resolution, cost-tier gating and the caller routing gate.
 
 Policy dispatch is deterministic: same config version + same alias -> same
 ordered target list. Runtime failover over that order is state-dependent and
-belongs to the dispatch loop, not here.
+belongs to the dispatch loop, not here. Neither may a request body widen that
+list: caller_model_selection names the keys that would choose models upstream.
 """
 
 from __future__ import annotations
@@ -12,6 +13,17 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from cerberus.registry.schema import Alias, CerberusConfig, CostTier
+
+# Caller-supplied body keys an upstream reads as model selection. OpenRouter
+# honours every one: models/route are its fallback list, and plugins and preset
+# can carry routing of their own. Forwarding any of them would let a caller run,
+# on the operator's credential, a model the pinned revision never named and
+# cost_eligible never gated.
+CALLER_ROUTING_KEYS = ("models", "route", "plugins", "preset")
+# OpenRouter server tools execute upstream under the operator's credential, and
+# some run models of their own (openrouter:fusion names a whole panel and
+# analyst). Refused as a class by type prefix; function tools are untouched.
+SERVER_TOOL_PREFIX = "openrouter:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,3 +108,25 @@ def cost_eligible(alias: Alias, targets: list[Target]) -> tuple[list[Target], li
                 continue
         eligible.append(target)
     return eligible, exclusions
+
+
+def caller_model_selection(body: Mapping[str, Any]) -> list[str]:
+    """The request-body keys that would choose or add models upstream.
+
+    Empty means the body leaves model selection to the pinned revision. A
+    non-empty answer is refused before any upstream call rather than stripped,
+    so the caller learns its routing was not honoured instead of being served
+    by a model it did not ask for.
+    """
+    found = [key for key in CALLER_ROUTING_KEYS if key in body]
+    tools = body.get("tools")
+    if any(_is_server_tool(tool) for tool in (tools if isinstance(tools, list) else [tools])):
+        found.append("tools")
+    if _is_server_tool(body.get("tool_choice")):
+        found.append("tool_choice")
+    return found
+
+
+def _is_server_tool(value: Any) -> bool:
+    kind = value.get("type") if isinstance(value, Mapping) else value
+    return isinstance(kind, str) and kind.strip().lower().startswith(SERVER_TOOL_PREFIX)

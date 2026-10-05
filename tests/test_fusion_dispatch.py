@@ -216,9 +216,11 @@ async def test_caller_cannot_override_panel_or_tool_surface(monkeypatch, tmp_pat
     resp, _ = await call(app, {**FUSION_REQ, "stream": True})
     assert resp.status_code == 200
     assert capture.body["model"] == "free-a" and "stream" not in capture.body
-    # ... but tools/tool_choice/plugins cannot be honored through a fusion alias: reject, never forward
+    # ... but tools/tool_choice/plugins cannot be honored through a fusion alias, and models/route/preset
+    # would choose models beside the deliberation: reject, never forward
     for key, value in (("plugins", [{"id": "fusion", "analysis_models": ["free-c"]}]), ("tool_choice", "none"),
-                       ("tools", [{"type": "function", "function": {"name": "x"}}])):
+                       ("tools", [{"type": "function", "function": {"name": "x"}}]),
+                       ("models", ["paid-x"]), ("route", "fallback"), ("preset", "operator-preset")):
         app, capture = make_app(monkeypatch, tmp_path)
         resp, events = await call(app, {**FUSION_REQ, key: value})
         assert resp.status_code == 400, key
