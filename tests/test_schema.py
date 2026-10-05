@@ -299,3 +299,93 @@ def test_non_loopback_server_requires_api_token_env():
 def test_unknown_top_level_keys_rejected():
     with pytest.raises(ValidationError):
         CerberusConfig.model_validate(make(pools={"free": {"providers": ["openrouter"]}}))
+
+
+# -- jev-router: Jev chooses within a pool Cerberus validates ------------------
+
+
+def _jev_raw(**alias_overrides) -> dict:
+    alias = {
+        "mode": "jev-router",
+        "candidates": [
+            {"provider": "openrouter", "credential": "primary", "model": "openrouter/free"},
+        ],
+        "jev_router": {"timeout_seconds": 60},
+    }
+    alias.update(alias_overrides)
+    return make(**{"aliases.cerberus/auto": alias})
+
+
+def test_jev_router_alias_valid():
+    config = CerberusConfig.model_validate(_jev_raw())
+    policy = config.aliases["cerberus/auto"].jev_router
+    assert policy is not None and policy.backend == "openrouter" and policy.allow_paid_pool is False
+
+
+def test_jev_router_mode_and_policy_block_must_agree():
+    with pytest.raises(ValidationError, match="jev_router policy block"):
+        CerberusConfig.model_validate(_jev_raw(jev_router=None))
+    raw = make()
+    raw["aliases"]["cerberus/free"]["jev_router"] = {"timeout_seconds": 60}
+    with pytest.raises(ValidationError, match="only valid on a jev-router alias"):
+        CerberusConfig.model_validate(raw)
+
+
+def test_jev_router_refuses_allow_paid_fallback():
+    with pytest.raises(ValidationError, match="allow_paid_pool"):
+        CerberusConfig.model_validate(_jev_raw(allow_paid_fallback=True))
+
+
+def test_jev_router_paid_pool_member_requires_opt_in():
+    paid = [
+        {"provider": "openrouter", "credential": "primary", "model": "openrouter/free"},
+        {"provider": "openrouter", "credential": "primary", "model": "anthropic/claude-sonnet"},
+    ]
+    with pytest.raises(ValidationError, match="allow_paid_pool"):
+        CerberusConfig.model_validate(_jev_raw(candidates=paid))
+    assert CerberusConfig.model_validate(
+        _jev_raw(candidates=paid, jev_router={"timeout_seconds": 60, "allow_paid_pool": True})
+    )
+
+
+def test_jev_router_pool_shares_one_provider_and_credential():
+    mixed = [
+        {"provider": "openrouter", "credential": "primary", "model": "openrouter/free"},
+        {"provider": "google", "credential": "free-1", "model": "gemini-flash"},
+    ]
+    with pytest.raises(ValidationError, match="one provider/credential"):
+        CerberusConfig.model_validate(_jev_raw(candidates=mixed))
+
+
+@pytest.mark.parametrize("pattern", ["anthropic/*", "*flash*", "~openai/gpt-luna-latest"])
+def test_jev_router_pool_admits_exact_slugs_only(pattern):
+    """The plugin reads its list as patterns; a registry key shaped like one
+    would admit models the registry never listed."""
+    raw = _jev_raw(candidates=[{"provider": "openrouter", "credential": "primary", "model": pattern}])
+    raw["providers"]["openrouter"]["models"][pattern] = {"cost_tier": "free"}
+    with pytest.raises(ValidationError, match="exact registry slugs"):
+        CerberusConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    "budget", [{"reasoning_effort": "low"}, {"chat_template_kwargs": {"enable_thinking": False}}]
+)
+def test_jev_router_refuses_a_per_candidate_reasoning_budget(budget):
+    candidate = {"provider": "openrouter", "credential": "primary", "model": "openrouter/free", **budget}
+    with pytest.raises(ValidationError, match="reasoning effort per request"):
+        CerberusConfig.model_validate(_jev_raw(candidates=[candidate]))
+
+
+def test_jev_router_refuses_a_duplicate_pool_member():
+    twice = [{"provider": "openrouter", "credential": "primary", "model": "openrouter/free"}] * 2
+    with pytest.raises(ValidationError, match="listed twice"):
+        CerberusConfig.model_validate(_jev_raw(candidates=twice))
+
+
+def test_jev_router_identity_must_allow_the_mode():
+    raw = _jev_raw()
+    raw["identities"]["recon"]["allowed_aliases"] = ["cerberus/free", "cerberus/auto"]
+    with pytest.raises(ValidationError, match="mode"):
+        CerberusConfig.model_validate(raw)
+    raw["identities"]["recon"]["allowed_modes"] = ["free", "jev-router"]
+    assert CerberusConfig.model_validate(raw)

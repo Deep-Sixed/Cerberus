@@ -309,7 +309,7 @@ class SqliteControlPlane:
             )
             self._connection.execute(
                 "INSERT INTO alias_bindings VALUES (?, ?, ?)",
-                (revision, alias_name, "fusion" if alias.mode == "fusion" else "dedicated"),
+                (revision, alias_name, alias.mode if alias.mode in ("fusion", "jev-router") else "dedicated"),
             )
             for ordinal, candidate in enumerate(alias.candidates):
                 model = config.resolve_model(candidate, context=f"alias {alias_name!r} candidate")
@@ -317,10 +317,18 @@ class SqliteControlPlane:
                     "INSERT INTO route_paths VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (revision, alias_name, ordinal, candidate.provider, candidate.credential, candidate.model, model.cost_tier),
                 )
-                if alias.mode == "fusion":
+                if alias.mode in ("fusion", "jev-router"):
                     self._connection.execute(
-                        "INSERT INTO route_members VALUES (?, ?, 'panel', ?, ?, ?, ?)",
-                        (revision, alias_name, ordinal, candidate.provider, candidate.credential, candidate.model),
+                        "INSERT INTO route_members VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            revision,
+                            alias_name,
+                            "panel" if alias.mode == "fusion" else "pool",
+                            ordinal,
+                            candidate.provider,
+                            candidate.credential,
+                            candidate.model,
+                        ),
                     )
             if alias.fusion is not None:
                 for role, candidate in (("analyst", alias.fusion.judge), ("outer", alias.fusion.outer_model)):

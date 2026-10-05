@@ -12,9 +12,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 CostTier = Literal["free", "paid"]
-AliasMode = Literal["direct", "dispatch", "free", "fusion"]
+AliasMode = Literal["direct", "dispatch", "free", "fusion", "jev-router"]
 # Managed deliberation backends Cerberus can hand a fusion request to.
 FusionBackendName = Literal["openrouter"]
+# Managed model-selection routers Cerberus can hand a jev-router request to.
+JevRouterBackendName = Literal["openrouter"]
+# OpenRouter's jev-router plugin accepts at most this many include patterns.
+JEV_ROUTER_MAX_POOL = 1024
 
 ALIAS_PREFIX = "cerberus/"
 VERSION_PATTERN = r"^cerberus-\d{4}-\d{2}-\d{2}\.\d+$"
@@ -239,6 +243,32 @@ class FusionPolicy(BaseModel):
         return self.outer if self.outer is not None else self.judge
 
 
+class JevRouterPolicy(BaseModel):
+    """Policy for a jev-router alias: Jev as one model-selection strategy.
+
+    Cerberus decides WHICH models may serve the alias: the candidates, each a
+    registry-validated exact slug, filtered before every request by cost policy,
+    provider health, cooldowns and credential presence. Only what survives is
+    handed to OpenRouter's hosted Jev Router, which picks one model (and its
+    reasoning effort) from that pool. Jev chooses within Cerberus policy; it
+    never widens it.
+
+    This is the hosted-router strategy. It can only choose among models one
+    OpenRouter credential reaches, so every candidate shares a provider and
+    credential, exactly as a fusion panel does.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    backend: JevRouterBackendName = "openrouter"
+    # Absolute deadline for the routed request, enforced by Cerberus.
+    timeout_seconds: float = Field(gt=0, le=600)
+    # Jev picks the cheapest model strong enough for the request, which is often
+    # a paid one, and may add an advisor on the hardest requests. A pool with any
+    # paid model is therefore an explicit opt-in, as allow_paid_panel is.
+    allow_paid_pool: bool = False
+
+
 class Alias(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -247,6 +277,7 @@ class Alias(BaseModel):
     allow_paid_fallback: bool = False
     allow_experimental: bool = False
     fusion: FusionPolicy | None = None
+    jev_router: JevRouterPolicy | None = None
 
     @model_validator(mode="after")
     def validate_mode_coherence(self) -> "Alias":
@@ -254,6 +285,14 @@ class Alias(BaseModel):
             raise ValueError("fusion-mode alias requires a fusion policy block")
         if self.mode != "fusion" and self.fusion is not None:
             raise ValueError("fusion policy block is only valid on a fusion-mode alias")
+        if self.mode == "jev-router" and self.jev_router is None:
+            raise ValueError("jev-router alias requires a jev_router policy block")
+        if self.mode != "jev-router" and self.jev_router is not None:
+            raise ValueError("jev_router policy block is only valid on a jev-router alias")
+        if self.mode == "jev-router" and self.allow_paid_fallback:
+            # there is no ordered fallback for it to govern: Jev chooses from the
+            # pool, and paid membership is jev_router.allow_paid_pool
+            raise ValueError("jev-router alias must not set allow_paid_fallback; use jev_router.allow_paid_pool")
         if self.mode == "free" and self.allow_paid_fallback:
             raise ValueError("free-mode alias must not set allow_paid_fallback")
         return self
@@ -320,6 +359,46 @@ class CerberusConfig(BaseModel):
             )
         return model
 
+    def _validate_jev_router_pool(self, alias_name: str, alias: Alias, tiers: list[CostTier]) -> None:
+        assert alias.jev_router is not None
+        policy = alias.jev_router
+        if len(alias.candidates) > JEV_ROUTER_MAX_POOL:
+            raise ValueError(
+                f"alias {alias_name!r}: pool of {len(alias.candidates)} exceeds the jev-router limit "
+                f"of {JEV_ROUTER_MAX_POOL} models"
+            )
+        anchor = alias.candidates[0]
+        seen: set[str] = set()
+        for candidate in alias.candidates:
+            # One routed request is one provider call under one credential, so the
+            # whole pool must be reachable through the same one.
+            if (candidate.provider, candidate.credential) != (anchor.provider, anchor.credential):
+                raise ValueError(
+                    f"alias {alias_name!r}: jev-router backend {policy.backend!r} requires every candidate "
+                    f"to use one provider/credential ({anchor.provider}/{anchor.credential}); "
+                    f"{candidate.provider}/{candidate.model} uses {candidate.provider}/{candidate.credential}"
+                )
+            # The plugin reads its include list as patterns: "*" is a wildcard and
+            # a leading "~" names a whole model family. Either could admit a model
+            # the registry never listed, so only exact slugs may enter the pool.
+            if "*" in candidate.model or candidate.model.startswith("~"):
+                raise ValueError(
+                    f"alias {alias_name!r}: jev-router candidate {candidate.model!r} is a pattern; "
+                    f"the pool admits exact registry slugs only"
+                )
+            # Jev sets the reasoning effort for each request. A per-candidate
+            # budget would never be applied, so it is refused rather than ignored.
+            if candidate.reasoning_effort is not None or candidate.chat_template_kwargs is not None:
+                raise ValueError(
+                    f"alias {alias_name!r}: jev-router candidate {candidate.model!r} sets a reasoning budget; "
+                    f"Jev chooses reasoning effort per request, so it would never be applied"
+                )
+            if candidate.model in seen:
+                raise ValueError(f"alias {alias_name!r}: jev-router candidate {candidate.model!r} is listed twice")
+            seen.add(candidate.model)
+        if not policy.allow_paid_pool and any(tier == "paid" for tier in tiers):
+            raise ValueError(f"alias {alias_name!r}: paid jev-router pool member requires allow_paid_pool")
+
     @model_validator(mode="after")
     def validate_references(self) -> "CerberusConfig":
         if self.server.host not in LOOPBACK_HOSTS and not self.server.api_token_env:
@@ -364,6 +443,9 @@ class CerberusConfig(BaseModel):
                     raise ValueError(
                         f"alias {alias_name!r}: paid panel member, judge or outer model requires allow_paid_panel"
                     )
+
+            if alias.jev_router is not None:
+                self._validate_jev_router_pool(alias_name, alias, tiers)
 
         for identity_name, identity in self.identities.items():
             if identity.jwt_client_id is not None and self.authentik is None:
