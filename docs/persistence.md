@@ -1,7 +1,7 @@
 # Persistence review for 0.01
 
 SQLite stores two state classes. Revisioned control state contains service
-aliases, bindings, ordered paths, Fusion and jev-router pool members, identity policy and credential
+aliases, bindings, ordered paths, Fusion, jev-router and jev pool members, identity policy and credential
 references plus one atomic active-revision pointer. Operational state contains
 provider health, cooldowns, routing events, usage projections and audit records;
 with OIDC enabled it also includes pending login and session state. Credential

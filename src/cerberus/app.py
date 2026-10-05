@@ -48,6 +48,7 @@ from cerberus.caller_fields import non_function_tools
 from cerberus.fusion import FusionBackend, OpenRouterFusionBackend, fusion_dispatch, fusion_status
 from cerberus.identity.session_store import InMemorySessionStore, SqliteSessionStore
 from cerberus.identity.sso import AdminSSO
+from cerberus.jev import DecisionBackend, OpenRouterJevDecider, jev_dispatch
 from cerberus.jev_router import JevRouterBackend, OpenRouterJevRouterBackend, jev_router_dispatch
 from cerberus.registry import CerberusConfig, ConfigDocument, load_config_document
 from cerberus.registry.schema import Alias, Candidate
@@ -164,6 +165,7 @@ def create_app(
     fusion_transport: httpx.AsyncBaseTransport | None = None,
     sso_transport: httpx.AsyncBaseTransport | None = None,
     jev_router_transport: httpx.AsyncBaseTransport | None = None,
+    jev_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     if config is None:
         document = load_config_document()
@@ -217,6 +219,9 @@ def create_app(
     jev_router_backends: dict[str, JevRouterBackend] = {
         "openrouter": OpenRouterJevRouterBackend(jev_router_transport)
     }
+    # Decision services a jev alias asks which pool model to run, keyed by
+    # JevPolicy.backend; fixed at boot the same way.
+    jev_deciders: dict[str, DecisionBackend] = {"openrouter": OpenRouterJevDecider(jev_transport)}
     if boot_config.admin_sso is not None:
         # sessions + pending logins share the state DB when one is configured, so
         # they survive restarts and are consistent across workers; else in-memory
@@ -238,6 +243,8 @@ def create_app(
                 await backend.aclose()
             for router in jev_router_backends.values():
                 await router.aclose()
+            for decider in jev_deciders.values():
+                await decider.aclose()
             if verifier is not None:
                 await verifier.aclose()
             if admin_sso is not None:
@@ -654,7 +661,7 @@ def create_app(
         cost gate, the same health/cooldown/credential order the failover loop
         walks, the same authorization predicate the inference path applies, and
         the same three gates fusion dispatch refuses on, and the same filtered
-        pool a jev-router request would send.
+        pool a jev-router request would send or a jev decision would be offered.
 
         Read-only, and behind the same boundary as /admin/status: the projection
         names every provider, model and credential reference in the revision, so
@@ -672,6 +679,7 @@ def create_app(
                 store=store,
                 backend_names=fusion_backends.keys(),
                 jev_router_backend_names=jev_router_backends.keys(),
+                jev_decider_names=jev_deciders.keys(),
             ),
             headers=_ADMIN_UI_HEADERS,
         )
@@ -984,6 +992,21 @@ def create_app(
                 document=document,
                 backends=jev_router_backends,
                 store=store,
+                telemetry=telemetry,
+                control_plane=control_plane,
+            )
+        if alias.mode == "jev":
+            # Jev chooses the order; Cerberus's own loop executes it, so jev
+            # aliases stream, fail over and cool down like any dispatch alias.
+            return await jev_dispatch(
+                body=body,
+                alias_name=alias_name,
+                alias=alias,
+                identity_name=context.name if context else None,
+                document=document,
+                backends=jev_deciders,
+                store=store,
+                client=request.app.state.http_client,
                 telemetry=telemetry,
                 control_plane=control_plane,
             )

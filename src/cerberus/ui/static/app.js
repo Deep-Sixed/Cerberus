@@ -145,6 +145,7 @@ function aliasEntries() {
 function aliasRoutable(entry) {
   if (entry.fusion) return entry.fusion.readiness.available === true;
   if (entry.jev_router) return entry.jev_router.readiness.available === true;
+  if (entry.jev) return entry.jev.readiness.available === true;
   return (entry.paths || []).some((path) => path.state === "eligible" || path.state === "standby");
 }
 
@@ -696,11 +697,11 @@ function describeState(path) {
     : { short: "excluded", note: reason.replace(/_/g, " "), tone: "t-warn" };
 }
 
-// A jev-router pool is not a ladder: Jev chooses among the eligible members, so
-// none is "first" and none is standby. Exclusions read exactly as they do for a
+// A jev-router or jev pool is not a ladder: Jev chooses among the eligible
+// members, so none is "first" and none is standby. Exclusions read exactly as they do for a
 // route path, because the same filters produced them.
 function describePoolState(path) {
-  if (path.state === "eligible") return { short: "in pool", note: "sent to Jev, which may choose it", tone: "t-up" };
+  if (path.state === "eligible") return { short: "in pool", note: "offered to Jev, which may choose it", tone: "t-up" };
   return describeState(path);
 }
 
@@ -724,7 +725,7 @@ function aliasRail(aliases, current) {
     const on = current && entry.alias === current.alias;
     const count = entry.paths ? entry.paths.length + " route paths"
       : entry.fusion ? entry.fusion.panel.length + " panel members"
-      : entry.jev_router.pool.length + " pool models";
+      : (entry.jev_router || entry.jev).pool.length + " pool models";
     return el("button", {
       class: "alias-tab" + (on ? " alias-tab-on" : ""),
       attrs: { type: "button", id: "alias-tab-" + index, "aria-pressed": on ? "true" : "false" },
@@ -732,10 +733,12 @@ function aliasRail(aliases, current) {
     },
       el("code", { class: "alias-name", text: entry.alias }),
       el("span", { class: "alias-meta" },
-        el("span", { class: "pill", text: entry.mode === "fusion" ? "Fusion" : entry.mode === "jev-router" ? "Jev Router" : "dedicated" }),
+        el("span", { class: "pill", text: MODE_PILL[entry.mode] || "dedicated" }),
         el("code", { text: count })));
   }));
 }
+
+const MODE_PILL = { fusion: "Fusion", "jev-router": "Jev Router", jev: "Jev" };
 
 function pathRow(entry, path, pool) {
   const state = pool ? describePoolState(path) : describeState(path);
@@ -798,6 +801,28 @@ function jevRouterPool(entry) {
         codeText(ready.available ? "yes" : "no", ready.available ? "t-up" : "t-bad"))));
 }
 
+function jevPool(entry) {
+  const j = entry.jev;
+  const d = j.decider;
+  const ready = d.readiness;
+  const yes = (v) => codeText(v ? "yes" : "no", v ? "t-up" : "t-bad");
+  return el("div", { class: "stack" },
+    el("p", { class: "chain-intro", text: "Cerberus filters this pool by cost, health, cooldown and credential, asks Jev which remaining model is the cheapest one strong enough, then runs that model first through its own failover loop. Without a usable decision the request runs in configured order." }),
+    el("div", null,
+      el("div", { class: "path-head" },
+        el("span", { text: "Member" }), el("span", { text: "Pool model" }),
+        el("span", { text: "Credential" }), el("span", { text: "Cost" }), el("span", { text: "State" })),
+      ...j.pool.map((p) => pathRow(entry, p, true))),
+    el("div", { class: "card" },
+      el("h3", { text: "Decider" }),
+      el("div", { class: "card-row" }, el("span", { text: "model" }), codeText(d.model)),
+      el("div", { class: "card-row" }, el("span", { text: "reads" }), codeText(d.input.replace(/_/g, " "))),
+      el("div", { class: "card-row" }, el("span", { text: "backend configured" }), yes(ready.backend_present)),
+      el("div", { class: "card-row" }, el("span", { text: "credential present" }), yes(ready.credential_present)),
+      el("div", { class: "card-row" }, el("span", { text: "can decide now" }), yes(ready.decides)),
+      el("div", { class: "card-row" }, el("span", { text: "can route now" }), yes(j.readiness.available))));
+}
+
 function inspectorRows(entry) {
   const projection = STATE.routes;
   const base = [
@@ -836,6 +861,26 @@ function inspectorRows(entry) {
       ["reason", member.exclusion ? memberState.note : "—", member.exclusion ? memberState.tone : "t-mono"],
     ]);
   }
+  if (entry.jev) {
+    const j = entry.jev;
+    const rows = base.concat([
+      ["decider", j.decider.model, "t-ink"],
+      ["decision reads", j.decider.input.replace(/_/g, " "), "t-mono"],
+      ["pool", j.readiness.pool_available + " of " + j.readiness.pool_size + " offered to Jev", "t-mono"],
+      ["paid pool", j.allow_paid_pool ? "allowed" : "prohibited", "t-mono"],
+      ["deciding", j.decider.readiness.decides ? "ready" : "configured order", j.decider.readiness.decides ? "t-up" : "t-warn"],
+    ]);
+    const member = j.pool.find((p) => p.ordinal === SELECTION.ordinal);
+    if (!member) return rows.concat([["pool model", "select a pool model", "t-mono"]]);
+    const memberState = describePoolState(member);
+    return rows.concat([
+      ["pool model", member.provider + "/" + member.model, "t-ink"],
+      ["credential", member.credential_ref, "t-mono"],
+      ["cost tier", member.cost_tier, member.cost_tier === "paid" ? "t-warn" : "t-mono"],
+      ["state", memberState.short, memberState.tone],
+      ["reason", member.exclusion ? memberState.note : "—", member.exclusion ? memberState.tone : "t-mono"],
+    ]);
+  }
   const path = (entry.paths || []).find((p) => p.ordinal === SELECTION.ordinal);
   if (!path) return base.concat([["route path", "select a route path", "t-mono"]]);
   const state = describeState(path);
@@ -853,7 +898,7 @@ function inspectorRows(entry) {
 function inspector(entry) {
   const rows = inspectorRows(entry);
   return el("aside", { class: "inspector", attrs: { id: "inspector", "aria-live": "polite", tabindex: "-1" } },
-    el("span", { class: "fact-label", text: entry.fusion ? "Fusion inspector" : entry.jev_router ? "Jev Router inspector" : "Route path inspector" }),
+    el("span", { class: "fact-label", text: entry.fusion ? "Fusion inspector" : entry.jev_router ? "Jev Router inspector" : entry.jev ? "Jev inspector" : "Route path inspector" }),
     el("div", { class: "inspect-rows" },
       ...rows.map(([k, v, tone]) => el("div", { class: "inspect-row" },
         el("span", { text: k }), codeText(v, tone)))),
@@ -876,6 +921,8 @@ function viewRoutes() {
     ? fusionChain(entry)
     : entry.jev_router
     ? jevRouterPool(entry)
+    : entry.jev
+    ? jevPool(entry)
     : el("div", null,
         el("div", { class: "path-head" },
           el("span", { text: "Order" }), el("span", { text: "Route path" }),
@@ -1032,6 +1079,10 @@ function jevRouterEvidence(event) {
   return event.jev_router ? evidenceRows("Jev Router evidence", event.jev_router) : null;
 }
 
+function jevEvidence(event) {
+  return event.jev ? evidenceRows("Jev decision", event.jev) : null;
+}
+
 function decisionInspector(event) {
   const rows = [
     ["request id", text(event.request_id), "t-ink"],
@@ -1060,6 +1111,7 @@ function decisionInspector(event) {
     exclusionList(event),
     fusionEvidence(event),
     jevRouterEvidence(event),
+    jevEvidence(event),
   );
 }
 

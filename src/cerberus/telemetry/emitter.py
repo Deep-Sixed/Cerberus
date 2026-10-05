@@ -17,7 +17,7 @@ from ..registry.schema import TelemetryConfig
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 AttemptOutcome = Literal[
     "missing_credentials",
     "transport_error",
@@ -91,6 +91,10 @@ class RoutingEvent:
     # jev-router only: the pool Cerberus sent, what the router reported choosing,
     # and why a response was withheld when it was. None outside jev-router mode.
     jev_router: dict[str, Any] | None = None
+    # jev only: which models were offered, what the decision chose and how sure
+    # it was, or why the request ran in configured order instead. Never any of
+    # the request text the decision read. None outside jev mode.
+    jev: dict[str, Any] | None = None
     schema_version: int = SCHEMA_VERSION
 
     def as_payload(self) -> dict[str, Any]:
@@ -101,6 +105,7 @@ class RoutingEvent:
             "reasoning_effort": self.reasoning_effort,
             "fusion": self.fusion,
             "jev_router": self.jev_router,
+            "jev": self.jev,
             "identity": self.identity,
             "config_version": self.config_version,
             "config_checksum": self.config_checksum,

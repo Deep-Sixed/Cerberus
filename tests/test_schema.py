@@ -389,3 +389,84 @@ def test_jev_router_identity_must_allow_the_mode():
         CerberusConfig.model_validate(raw)
     raw["identities"]["recon"]["allowed_modes"] = ["free", "jev-router"]
     assert CerberusConfig.model_validate(raw)
+
+
+# -- jev: Cerberus asks, Jev decides, Cerberus executes -------------------------
+
+
+def _jev_native_raw(**alias_overrides) -> dict:
+    raw = make()
+    raw["providers"]["openrouter"]["models"]["openrouter/free"]["strength"] = "standard"
+    raw["providers"]["openrouter"]["models"]["anthropic/claude-sonnet"]["strength"] = "frontier"
+    raw["providers"]["google"]["models"]["gemini-flash"]["strength"] = "standard"
+    alias = {
+        "mode": "jev",
+        "candidates": [
+            {"provider": "google", "credential": "free-1", "model": "gemini-flash"},
+            {"provider": "openrouter", "credential": "primary", "model": "openrouter/free"},
+        ],
+        "jev": {"decider": {"provider": "openrouter", "credential": "primary"}},
+    }
+    alias.update(alias_overrides)
+    raw["aliases"]["cerberus/smart"] = alias
+    return raw
+
+
+def test_jev_alias_valid_with_pinned_defaults():
+    """Unlike jev-router, the pool may span providers and credentials."""
+    config = CerberusConfig.model_validate(_jev_native_raw())
+    policy = config.aliases["cerberus/smart"].jev
+    assert policy is not None
+    assert policy.model == "typesafe/jev-1.13"
+    assert str(policy.endpoint) == "https://openrouter.ai/api/alpha/decisions"
+    assert (policy.input, policy.max_input_chars, policy.allow_paid_pool) == ("last_user_message", 4000, False)
+
+
+def test_jev_mode_and_policy_block_must_agree():
+    with pytest.raises(ValidationError, match="jev policy block"):
+        CerberusConfig.model_validate(_jev_native_raw(jev=None))
+    raw = _jev_native_raw()
+    raw["aliases"]["cerberus/free"]["jev"] = {"decider": {"provider": "openrouter", "credential": "primary"}}
+    with pytest.raises(ValidationError, match="only valid on a jev alias"):
+        CerberusConfig.model_validate(raw)
+
+
+def test_jev_decider_must_be_a_registered_credential():
+    raw = _jev_native_raw(jev={"decider": {"provider": "openrouter", "credential": "ghost"}})
+    with pytest.raises(ValidationError, match="registered provider credential"):
+        CerberusConfig.model_validate(raw)
+
+
+def test_jev_pool_models_need_a_strength():
+    raw = _jev_native_raw()
+    del raw["providers"]["google"]["models"]["gemini-flash"]["strength"]
+    with pytest.raises(ValidationError, match="needs a registry strength"):
+        CerberusConfig.model_validate(raw)
+
+
+def test_jev_paid_pool_member_requires_opt_in_and_refuses_paid_fallback():
+    paid = {"provider": "openrouter", "credential": "primary", "model": "anthropic/claude-sonnet"}
+    raw = _jev_native_raw()
+    raw["aliases"]["cerberus/smart"]["candidates"].append(paid)
+    with pytest.raises(ValidationError, match="allow_paid_pool"):
+        CerberusConfig.model_validate(raw)
+    raw["aliases"]["cerberus/smart"]["jev"]["allow_paid_pool"] = True
+    assert CerberusConfig.model_validate(raw)
+    raw["aliases"]["cerberus/smart"]["allow_paid_fallback"] = True
+    with pytest.raises(ValidationError, match="allow_paid_pool"):
+        CerberusConfig.model_validate(raw)
+
+
+def test_jev_endpoint_must_be_https():
+    raw = _jev_native_raw(jev={
+        "decider": {"provider": "openrouter", "credential": "primary"},
+        "endpoint": "http://decisions.example/api/alpha/decisions",
+    })
+    with pytest.raises(ValidationError, match="https"):
+        CerberusConfig.model_validate(raw)
+
+
+def test_jev_input_policy_is_a_closed_vocabulary():
+    raw = _jev_native_raw(jev={"decider": {"provider": "openrouter", "credential": "primary"}, "input": "everything"})
+    with pytest.raises(ValidationError):
+        CerberusConfig.model_validate(raw)
