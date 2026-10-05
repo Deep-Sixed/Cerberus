@@ -934,9 +934,11 @@ def create_app(
                         status_code=403,
                         content={"error": {"message": f"Identity not authorized for {alias_name!r}", "reason": denial}},
                     )
-        if alias.mode != "fusion":
-            # fusion rejects caller tools outright (fusion_dispatch); elsewhere
-            # only function tools are forwarded
+        if alias.mode not in ("fusion", "jev-router"):
+            # fusion rejects caller tools outright (fusion_dispatch) and
+            # jev-router refuses anything outside its own allowlist
+            # (jev_router_dispatch), each with a routing event; elsewhere only
+            # function tools are forwarded
             server_tools = non_function_tools(body)
             if server_tools:
                 return JSONResponse(

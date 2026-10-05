@@ -19,6 +19,7 @@ from typing import Any
 
 from fastapi.responses import JSONResponse
 
+from cerberus.caller_fields import CALLER_FIELDS
 # cerberus.router before cerberus.egress: egress.client imports router.engine, and
 # the router package imports egress.client in turn, so egress first is a cycle.
 from cerberus.router.engine import Target
@@ -36,40 +37,14 @@ from cerberus.registry.loader import ConfigDocument
 from cerberus.registry.schema import Alias, JevRouterPolicy
 from cerberus.telemetry import RoutingAttempt, RoutingEvent, TelemetryEmitter
 
-# What a caller may set on a jev-router request. This is an allowlist, not a
-# denylist: anything that decides where a request runs (model fallback lists,
+# What a caller may set on a jev-router request: the standard chat fields every
+# alias forwards, less the reasoning controls, because Jev chooses the effort per
+# request and overriding it silently in either direction would hide the
+# substitution. Unlike dispatch, which drops anything else, a jev-router alias
+# refuses it: anything that decides where a request runs (model fallback lists,
 # route, plugins, presets, provider routing, server tools) is Cerberus's to
-# construct, and anything not listed here is refused rather than forwarded, so
-# a field OpenRouter adds tomorrow cannot widen the pool. reasoning_effort and
-# reasoning are absent on purpose: Jev chooses the effort per request, and
-# overriding it silently in either direction would hide the substitution.
-_CALLER_FIELDS = frozenset(
-    {
-        "messages",
-        "model",  # the alias; replaced by the router model
-        "stream",  # removed; jev-router is not streamed
-        "stream_options",
-        "temperature",
-        "top_p",
-        "n",
-        "stop",
-        "max_tokens",
-        "max_completion_tokens",
-        "presence_penalty",
-        "frequency_penalty",
-        "logit_bias",
-        "logprobs",
-        "top_logprobs",
-        "seed",
-        "user",
-        "response_format",
-        "tools",  # function tools only; see caller_field_violations
-        "tool_choice",
-        "parallel_tool_calls",
-        "functions",
-        "function_call",
-    }
-)
+# construct, and a caller is told rather than quietly served something else.
+_CALLER_FIELDS = CALLER_FIELDS - {"reasoning_effort", "chat_template_kwargs"}
 _TOOL_CHOICE_MODES = frozenset({"none", "auto", "required"})
 
 
