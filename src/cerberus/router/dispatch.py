@@ -3,6 +3,8 @@
 One loop serves every alias mode (the heads share one policy engine).
 Fusion-mode aliases divert to the fusion backend (cerberus.fusion.dispatch);
 jev-router aliases divert to the hosted Jev Router (cerberus.jev_router.dispatch).
+jev aliases run through this loop too, in an order a decision chose
+(cerberus.jev.dispatch hands it a DispatchPlan).
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import json
 import os
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -30,6 +33,21 @@ from cerberus.router.availability import runtime_exclusion
 from cerberus.router.engine import Target, cost_eligible, ordered_targets
 from cerberus.state.cooldowns import InMemoryCooldownStore
 from cerberus.telemetry import RoutingAttempt, RoutingEvent, RoutingOutcome, TelemetryEmitter
+
+
+@dataclass(frozen=True, slots=True)
+class DispatchPlan:
+    """An attempt order decided before the loop, by a model-selection strategy.
+
+    The loop still owns everything after the order: health, cooldown and
+    credential gates, failover, cooldown writes and telemetry. A plan can only
+    reorder what policy already admitted; it carries no target the alias does
+    not configure, and the cost gate it was built under is recorded with it.
+    """
+
+    targets: list[Target]  # attempt order, cost-gated
+    exclusions: list[dict]  # what cost policy removed before ordering
+    jev: dict[str, Any]  # the decision record, for telemetry and the response
 
 
 def _attempt(
@@ -72,6 +90,7 @@ def _event(
     candidates: list[str] | None = None,
     exclusions: list[dict] | None = None,
     upstream_reported_cost: float | None = None,
+    jev: dict[str, Any] | None = None,
 ) -> RoutingEvent:
     return RoutingEvent(
         request_id=request_id,
@@ -96,6 +115,7 @@ def _event(
         identity=identity,
         config_version=config_version,
         config_checksum=config_checksum,
+        jev=jev,
     )
 
 
@@ -191,6 +211,7 @@ async def dispatch(
     client: httpx.AsyncClient,
     telemetry: TelemetryEmitter,
     control_plane: Any | None = None,
+    plan: DispatchPlan | None = None,
 ) -> JSONResponse | StreamingResponse:
     request_id = str(uuid.uuid4())
     config = document.config
@@ -200,7 +221,14 @@ async def dispatch(
 
     targets = ordered_targets(config, alias_name)
     ordered = [f"{t.provider_id}/{t.credential_id}/{t.model}" for t in targets]
-    eligible, exclusions = cost_eligible(alias, targets)
+    if plan is None:
+        eligible, exclusions = cost_eligible(alias, targets)
+    else:
+        # a plan may only reorder what this alias configures, never add to it
+        if any(target not in targets for target in plan.targets):
+            raise ValueError(f"dispatch plan for {alias_name!r} names a target the alias does not configure")
+        eligible, exclusions = list(plan.targets), list(plan.exclusions)
+    jev_record = plan.jev if plan is not None else None
     attempts: list[RoutingAttempt] = []
     attempted = 0
 
@@ -283,6 +311,8 @@ async def dispatch(
             "config_version": document.version,
             "config_checksum": document.checksum,
         }
+        if jev_record is not None:
+            metadata["jev"] = jev_record
 
         if streaming:
             collector = StreamingUsageCollector()
@@ -323,6 +353,7 @@ async def dispatch(
                             identity=identity_name,
                             config_version=document.version,
                             config_checksum=document.checksum,
+                            jev=jev_record,
                             candidates=ordered,
                             exclusions=list(exclusions),
                         )
@@ -361,6 +392,7 @@ async def dispatch(
                     identity=identity_name,
                     config_version=document.version,
                     config_checksum=document.checksum,
+                    jev=jev_record,
                     candidates=ordered,
                     exclusions=list(exclusions),
                 )
@@ -387,6 +419,7 @@ async def dispatch(
                 identity=identity_name,
                 config_version=document.version,
                 config_checksum=document.checksum,
+                jev=jev_record,
                 candidates=ordered,
                 exclusions=list(exclusions),
             )
@@ -413,6 +446,7 @@ async def dispatch(
             identity=identity_name,
             config_version=document.version,
             config_checksum=document.checksum,
+            jev=jev_record,
             candidates=ordered,
             exclusions=list(exclusions),
         )
