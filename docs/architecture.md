@@ -9,6 +9,8 @@ client → cerberus-api → identity + alias authorization + cost policy
                      → filtered pool → Jev Router → OpenRouter /chat/completions
                                       → typesafe/jev-router chooses one pool model
                                       → decision verified against the pool → response
+                     → filtered pool → Jev decision → OpenRouter /api/alpha/decisions
+                                      → chosen model first → Dispatch → any provider
 ```
 
 Cerberus owns routing policy, identity authorization, configured free/paid
@@ -68,10 +70,51 @@ calls. Readiness is the backend's presence and a non-empty pool.
 
 The hosted router can only choose among models one OpenRouter credential
 reaches; it cannot place a request on a local or non-OpenRouter provider. A
-native strategy in which Cerberus asks Jev for a decision over every eligible
-backend and executes the winner itself is the intended next step, and would
-reuse the same pool filter. There is no per-request cost ceiling: Cerberus does
-not hold model prices, and a ceiling checked after a routed call is too late.
+`jev` alias does. There is no per-request cost ceiling: Cerberus does not hold
+model prices, and a ceiling checked after a routed call is too late.
+
+## Jev
+
+A `jev` alias uses Jev as Cerberus's model-selection intelligence and keeps
+execution in Cerberus. Three layers, three questions: Cerberus answers "what may
+run?", Jev answers "what should run?", and the provider runs it.
+
+The pool is the alias's candidates on any provider — a local llama.cpp host,
+Cloudflare, OpenRouter — each a registry model with a `strength`. Before every
+request `router/pool.py` filters it exactly as it does for jev-router (cost, then
+health, cooldown, credential). The distinct models that survive are offered to
+Jev under opaque ids (`m1`, `m2`, …) and described by registry facts only: model
+id, strength, cost tier, context window, capabilities, description. Provider and
+credential names never leave. One `choice` question goes to OpenRouter's
+Decisions API (`POST /api/alpha/decisions`, model `typesafe/jev-1.13` pinned by
+default) under the decider credential the policy names: which candidate is the
+least costly one still strong enough for this request.
+
+The decision service is a third party even when the winner is local, so what it
+reads is policy (`jev.input`): the latest user message (default), the whole
+conversation, or request metadata with no prompt text at all — always truncated
+to `max_input_chars`, always with the request's shape (turns, size, tools,
+response format, requested output length). With one model or none left there is
+nothing to choose, and no decision is asked, so no text leaves.
+
+Jev's answer can only reorder: the chosen model goes first, the rest of the
+cost-admitted pool follows in configured order, and the ordinary failover loop
+executes that order — health, cooldown and credential gates, 429 cooldowns,
+streaming and telemetry included. An answer that is not exactly an offered id is
+never interpreted. Every way of not getting a usable answer — no decider backend
+or credential, the decider's provider marked down, timeout, transport or HTTP
+error, an unreadable response, an absent or unknown choice — runs the request in
+configured order instead, which every pool member already satisfies; the alias
+stays routable while no decision can be had.
+
+Each routing event carries a `jev` record: options offered, whether the decision
+was `chosen`, `skipped` or a `fallback`, the reason, the choice and its
+probability, decision latency, status and usage. It never carries request text.
+The confirmed Decisions API contract covers the endpoint, the model, the
+`model`/`state`/`questions` request and `answers` keyed by question id; the
+fields inside one question and one answer are not yet confirmed, so the answer
+is read tolerantly and a misread degrades to configured order rather than to an
+unvetted model.
 
 ## Dispatch control plane
 

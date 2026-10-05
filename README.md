@@ -95,6 +95,24 @@ Requirements and caveats:
 - A withheld response has already been billed by OpenRouter.
 - The hosted router cannot choose local or non-OpenRouter providers.
 
+## Jev
+
+A `jev` alias makes Jev Cerberus's model-selection intelligence while Cerberus
+keeps execution. The pool may span every provider Cerberus knows, local hosts
+included. Before each request Cerberus filters it, asks Jev through OpenRouter's
+Decisions API which remaining model is the cheapest one strong enough, and runs
+that model first through its own failover loop, the rest in configured order.
+
+- Each pool model needs a registry `strength` (`basic`, `standard`, `strong`,
+  `frontier`); Jev weighs it against cost tier.
+- Jev reads the latest user message by default (`jev.input`), or the whole
+  conversation, or request metadata only. Provider names never leave.
+- `typesafe/jev-1.13` is pinned by default so an upstream model update cannot
+  silently change routing.
+- If no usable decision comes back, the request runs in configured order; a
+  decision outage never takes the alias down.
+- Streams, fails over and cools down like any dispatch alias.
+
 ## Dispatch
 
 Dispatch resolves a stable Cerberus alias through a validated, identity-scoped

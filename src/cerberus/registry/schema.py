@@ -12,13 +12,22 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 CostTier = Literal["free", "paid"]
-AliasMode = Literal["direct", "dispatch", "free", "fusion", "jev-router"]
+AliasMode = Literal["direct", "dispatch", "free", "fusion", "jev-router", "jev"]
 # Managed deliberation backends Cerberus can hand a fusion request to.
 FusionBackendName = Literal["openrouter"]
 # Managed model-selection routers Cerberus can hand a jev-router request to.
 JevRouterBackendName = Literal["openrouter"]
 # OpenRouter's jev-router plugin accepts at most this many include patterns.
 JEV_ROUTER_MAX_POOL = 1024
+# Decision services Cerberus can ask which pool model should serve a jev request.
+JevDeciderName = Literal["openrouter"]
+# What of a request a jev alias lets the decision service read.
+JevInput = Literal["last_user_message", "full_conversation", "metadata"]
+# How strong a model is, relative to the others an operator registers. Jev
+# weighs it against cost to pick the cheapest model strong enough for a task.
+ModelStrength = Literal["basic", "standard", "strong", "frontier"]
+# Distinct models one decision may choose between; bounds the decision input.
+JEV_MAX_OPTIONS = 64
 
 ALIAS_PREFIX = "cerberus/"
 VERSION_PATTERN = r"^cerberus-\d{4}-\d{2}-\d{2}\.\d+$"
@@ -138,6 +147,11 @@ class ModelEntry(BaseModel):
     cost_tier: CostTier
     capabilities: list[str] = Field(default_factory=list)
     context_window: int | None = Field(default=None, ge=1)
+    # Read only by a jev alias, which describes each pool model to the decision
+    # service by these and never by its provider name. Required for a model in
+    # a jev pool: without a strength there is nothing to weigh cost against.
+    strength: ModelStrength | None = None
+    description: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class CredentialEntry(BaseModel):
@@ -269,6 +283,53 @@ class JevRouterPolicy(BaseModel):
     allow_paid_pool: bool = False
 
 
+class JevDecider(BaseModel):
+    """Where a jev alias asks for its decision: a registered credential, by name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(min_length=1)
+    credential: str = Field(min_length=1)
+
+
+class JevPolicy(BaseModel):
+    """Policy for a jev alias: Cerberus asks Jev which model, then runs it itself.
+
+    The pool is the alias's candidates on any provider — local, Cloudflare,
+    OpenRouter — filtered by cost, health, cooldown and credential before every
+    request. Jev, a decision model, is asked one bounded question: which of the
+    surviving models is the cheapest one strong enough for this request. Cerberus
+    then executes that model through its own failover loop, the rest of the pool
+    behind it in configured order. If Jev cannot answer, or answers with
+    anything but a pool model, the request runs in configured order instead.
+    Jev decides; it never executes, and it never sees a provider name.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    decider: JevDecider
+    backend: JevDeciderName = "openrouter"
+    endpoint: HttpUrl = HttpUrl("https://openrouter.ai/api/alpha/decisions")
+    # Pinned, so an upstream model update cannot silently change routing; bump
+    # it deliberately after testing. "~typesafe/jev-latest" follows upstream.
+    model: str = Field(default="typesafe/jev-1.13", min_length=1)
+    # The decision service is a third party even when the winner is local, so
+    # what it reads is policy: the latest user message by default, the whole
+    # conversation only by choice, or request metadata and no prompt text.
+    input: JevInput = "last_user_message"
+    max_input_chars: int = Field(default=4000, ge=1, le=100_000)
+    # Deadline for the decision alone; on expiry the request runs in configured
+    # order. Generation keeps the provider's own timeouts.
+    timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    allow_paid_pool: bool = False
+
+    @model_validator(mode="after")
+    def validate_endpoint(self) -> "JevPolicy":
+        if self.endpoint.scheme != "https":
+            raise ValueError("jev endpoint must use https: the decision input carries request text")
+        return self
+
+
 class Alias(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -278,6 +339,7 @@ class Alias(BaseModel):
     allow_experimental: bool = False
     fusion: FusionPolicy | None = None
     jev_router: JevRouterPolicy | None = None
+    jev: JevPolicy | None = None
 
     @model_validator(mode="after")
     def validate_mode_coherence(self) -> "Alias":
@@ -293,6 +355,14 @@ class Alias(BaseModel):
             # there is no ordered fallback for it to govern: Jev chooses from the
             # pool, and paid membership is jev_router.allow_paid_pool
             raise ValueError("jev-router alias must not set allow_paid_fallback; use jev_router.allow_paid_pool")
+        if self.mode == "jev" and self.jev is None:
+            raise ValueError("jev alias requires a jev policy block")
+        if self.mode != "jev" and self.jev is not None:
+            raise ValueError("jev policy block is only valid on a jev alias")
+        if self.mode == "jev" and self.allow_paid_fallback:
+            # Jev may choose a paid model first, so paid is pool membership, not
+            # a fallback
+            raise ValueError("jev alias must not set allow_paid_fallback; use jev.allow_paid_pool")
         if self.mode == "free" and self.allow_paid_fallback:
             raise ValueError("free-mode alias must not set allow_paid_fallback")
         return self
@@ -399,6 +469,29 @@ class CerberusConfig(BaseModel):
         if not policy.allow_paid_pool and any(tier == "paid" for tier in tiers):
             raise ValueError(f"alias {alias_name!r}: paid jev-router pool member requires allow_paid_pool")
 
+    def _validate_jev_pool(self, alias_name: str, alias: Alias, tiers: list[CostTier]) -> None:
+        assert alias.jev is not None
+        policy = alias.jev
+        decider = self.providers.get(policy.decider.provider)
+        if decider is None or policy.decider.credential not in decider.credentials:
+            raise ValueError(
+                f"alias {alias_name!r}: jev decider {policy.decider.provider}/{policy.decider.credential} "
+                f"is not a registered provider credential"
+            )
+        options = {(candidate.provider, candidate.model) for candidate in alias.candidates}
+        if len(options) > JEV_MAX_OPTIONS:
+            raise ValueError(
+                f"alias {alias_name!r}: {len(options)} distinct pool models exceed the jev limit of {JEV_MAX_OPTIONS}"
+            )
+        for candidate in alias.candidates:
+            if self.providers[candidate.provider].models[candidate.model].strength is None:
+                raise ValueError(
+                    f"alias {alias_name!r}: jev pool model {candidate.provider}/{candidate.model} needs a "
+                    f"registry strength for Jev to weigh against its cost"
+                )
+        if not policy.allow_paid_pool and any(tier == "paid" for tier in tiers):
+            raise ValueError(f"alias {alias_name!r}: paid jev pool member requires allow_paid_pool")
+
     @model_validator(mode="after")
     def validate_references(self) -> "CerberusConfig":
         if self.server.host not in LOOPBACK_HOSTS and not self.server.api_token_env:
@@ -446,6 +539,8 @@ class CerberusConfig(BaseModel):
 
             if alias.jev_router is not None:
                 self._validate_jev_router_pool(alias_name, alias, tiers)
+            if alias.jev is not None:
+                self._validate_jev_pool(alias_name, alias, tiers)
 
         for identity_name, identity in self.identities.items():
             if identity.jwt_client_id is not None and self.authentik is None:

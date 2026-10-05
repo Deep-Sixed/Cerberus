@@ -10,8 +10,10 @@ in a browser. This module calls the deciders and arranges what they return:
     runtime_exclusion()    health, then cooldown, then credential presence
     authorization_error()  whether a configured identity may use the alias
     fusion_readiness()     backend, credential and provider gates for fusion
-    resolve_pool()         the filtered pool a jev-router request would send
+    resolve_pool()         the filtered pool a jev-router request would send,
+                           or a jev decision would be offered
     jev_router_readiness() backend presence and a non-empty pool
+    decider_readiness()    whether a jev alias could ask for a decision now
 
 Fusion is projected differently on purpose. Its panel never enters the failover
 loop — Cerberus resolves one backend, one credential and one provider and sends
@@ -23,6 +25,10 @@ A jev-router alias is a pool, not a ladder: Jev chooses among its members, so
 none is preferred over another and there is no standby. Each member is either in
 the pool the next request would send (eligible) or filtered out before Jev sees
 it (excluded, with the first filter that refused it).
+
+A jev alias is the same kind of pool, across any providers, plus a decider. The
+alias stays routable while no decision can be had — it then runs in configured
+order — so its readiness and its decider's are reported separately.
 
 Read-only: no upstream connection, no cooldown applied, no lifecycle state, and
 no secret value or credential locator — a path names its credential, never where
@@ -36,6 +42,7 @@ from typing import Any
 
 from cerberus.fusion.dispatch import fusion_readiness
 from cerberus.identity.auth import IdentityContext, authorization_error
+from cerberus.jev.dispatch import decider_readiness
 from cerberus.jev_router.backend import JEV_ROUTER_MODEL
 from cerberus.jev_router.dispatch import jev_router_readiness
 from cerberus.registry.loader import ConfigDocument
@@ -203,6 +210,54 @@ def _jev_router(
     }
 
 
+def _jev(
+    config: CerberusConfig,
+    alias_name: str,
+    alias: Alias,
+    *,
+    decider_names: Collection[str],
+    control_plane: Any | None,
+    store: Any,
+    now: float | None,
+) -> dict[str, Any]:
+    assert alias.jev is not None
+    policy = alias.jev
+    members = resolve_pool(
+        config, alias_name, allow_paid=policy.allow_paid_pool, control_plane=control_plane, store=store, now=now
+    )
+    pool = [
+        _path(
+            ordinal,
+            member.target,
+            STATE_EXCLUDED if member.exclusion is not None else STATE_ELIGIBLE,
+            (
+                {"reason": member.exclusion.reason, "scope": member.exclusion.scope, "retry_at": member.exclusion.retry_at}
+                if member.exclusion is not None
+                else None
+            ),
+        )
+        for ordinal, member in enumerate(members)
+    ]
+    attemptable = sum(1 for member in members if member.exclusion is None)
+    return {
+        "decider": {
+            "backend": policy.backend,
+            "provider": policy.decider.provider,
+            "credential_ref": policy.decider.credential,
+            "model": policy.model,
+            "input": policy.input,
+            "max_input_chars": policy.max_input_chars,
+            "timeout_seconds": policy.timeout_seconds,
+            "readiness": decider_readiness(
+                config, alias, backend_names=decider_names, control_plane=control_plane
+            ),
+        },
+        "allow_paid_pool": policy.allow_paid_pool,
+        "pool": pool,
+        "readiness": {"pool_available": attemptable, "pool_size": len(members), "available": attemptable > 0},
+    }
+
+
 def route_projection(
     document: ConfigDocument,
     *,
@@ -210,6 +265,7 @@ def route_projection(
     store: Any,
     backend_names: Collection[str] = (),
     jev_router_backend_names: Collection[str] = (),
+    jev_decider_names: Collection[str] = (),
     now: float | None = None,
 ) -> dict[str, Any]:
     """The active revision's routes, with every state decided server-side."""
@@ -232,6 +288,16 @@ def route_projection(
                 alias_name,
                 alias,
                 backend_names=jev_router_backend_names,
+                control_plane=control_plane,
+                store=store,
+                now=now,
+            )
+        elif alias.mode == "jev":
+            projected["jev"] = _jev(
+                config,
+                alias_name,
+                alias,
+                decider_names=jev_decider_names,
                 control_plane=control_plane,
                 store=store,
                 now=now,

@@ -15,4 +15,5 @@ def test_example_config_validates():
         "cerberus/dispatch-standard",
         "cerberus/fusion-code",
         "cerberus/auto",
+        "cerberus/smart",
     }
