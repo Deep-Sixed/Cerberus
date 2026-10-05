@@ -14,7 +14,10 @@ import pytest
 from cerberus.app import create_app
 from cerberus.caller_fields import caller_body, non_function_tools
 from cerberus.fusion.backend import FusionRequest, OpenRouterFusionBackend
+from cerberus.registry import load_config_document
 from tests.test_app import call, make_config
+from tests.test_control import ok_upstream, write_config
+from tests.test_fusion_dispatch import AUTH, DISPATCH_REQ, Capture, client_for, fusion_raw
 
 MESSAGES = [{"role": "user", "content": "hi"}]
 
@@ -81,6 +84,43 @@ async def test_dispatch_refuses_server_tools(monkeypatch):
     assert response.status_code == 400
     assert response.json()["error"]["reason"] == "unsupported_tool"
     assert seen == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"tools": [{"type": "openrouter:fusion", "parameters": {"analysis_models": ["paid/model"]}}]},
+        {"tool_choice": {"type": "openrouter:fusion"}},
+    ],
+    ids=["tools", "tool_choice"],
+)
+async def test_server_tool_refusal_is_a_routing_event(monkeypatch, tmp_path, extra):
+    """The refusal is recorded like every other routing decision, under the
+    caller's identity, and the response names the event's request id."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setenv("CB_KEY_DEV", "cb-dev")
+    monkeypatch.setenv("CB_KEY_DISPATCH", "cb-dispatch")
+    doc = load_config_document(write_config(tmp_path, "v.yaml", fusion_raw()), validate_credentials=False)
+    upstream = Capture(ok_upstream)
+    app = create_app(doc, http_transport=httpx.MockTransport(upstream))
+    async with app.router.lifespan_context(app):
+        async with client_for(app) as client:
+            response = await client.post("/v1/chat/completions", json={**DISPATCH_REQ, **extra}, headers=AUTH)
+            events = (await client.get("/admin/events")).json()["events"]
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["reason"] == "unsupported_tool"
+    assert upstream.requests == []
+    assert len(events) == 1
+    event = events[0]
+    assert (event["outcome"], event["http_status"]) == ("invalid_request", 400)
+    assert (event["alias"], event["mode"], event["identity"]) == ("cerberus/dispatch-dev", "dispatch", "dev")
+    assert event["request_id"] == error["request_id"]
+    assert event["attempt_count"] == 0 and event["provider"] is None and event["model"] is None
+    assert event["config_version"] == doc.version and event["config_checksum"] == doc.checksum
 
 
 def test_fusion_body_drops_provider_extensions():

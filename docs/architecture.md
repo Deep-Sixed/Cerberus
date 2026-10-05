@@ -149,6 +149,25 @@ per-request failures are excluded at their own scope by the cooldown store.
 Normal label lookup reads the in-memory snapshot and performs no SQL.
 Routing and usage records are written asynchronously after a decision.
 
+The request body cannot add a path either. On every alias the failover loop
+serves (`dispatch`, `free`, `jev`, and direct free models), the body a provider
+receives is the caller's restricted to the standard chat-completions fields in
+`caller_fields.CALLER_FIELDS`, with `model` replaced by the target being
+attempted. Every other field is dropped before the upstream call, without
+error, as most gateways do. That includes OpenRouter's `models` fallback list,
+`route`, `plugins`, `preset` and `provider`, because each can select or add a
+model the pinned revision never named, or the cost gate never weighed, under
+the operator's credential. Function tools are forwarded; a `tools` entry or a
+`tool_choice` of any other type is refused with 400 (`reason: unsupported_tool`).
+Such a tool is a server tool that runs upstream: `openrouter:fusion` runs a
+panel of its own. The refusal is recorded as a routing event with outcome
+`invalid_request`, under the caller's identity and the request's revision, and
+the response carries the event's `request_id`, so a refused request appears in
+`/admin/events` beside every other routing decision. Fusion builds its backend
+body from the same allowlist and refuses caller `tools`, `tool_choice` and
+`plugins` outright, also with a 400 and a routing event. Jev Router refuses
+rather than drops every field outside its own allowlist (see Jev Router).
+
 `/health` is the only ungated endpoint and answers liveness only —
 `{"status": "ok", "service": "cerberus"}` — which is what a container or
 orchestrator probe needs. Operational diagnostics (config version and checksum,
