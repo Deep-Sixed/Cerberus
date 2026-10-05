@@ -52,7 +52,7 @@ from cerberus.jev import DecisionBackend, OpenRouterJevDecider, jev_dispatch
 from cerberus.jev_router import JevRouterBackend, OpenRouterJevRouterBackend, jev_router_dispatch
 from cerberus.registry import CerberusConfig, ConfigDocument, load_config_document
 from cerberus.registry.schema import Alias, Candidate
-from cerberus.router.dispatch import dispatch, shadow_decision_event, unauthorized_event
+from cerberus.router.dispatch import dispatch, invalid_request_event, shadow_decision_event, unauthorized_event
 from cerberus.state import InMemoryCooldownStore, SqliteCooldownStore
 from cerberus.telemetry import TelemetryEmitter
 
@@ -946,15 +946,25 @@ def create_app(
             # fusion rejects caller tools outright (fusion_dispatch) and
             # jev-router refuses anything outside its own allowlist
             # (jev_router_dispatch), each with a routing event; elsewhere only
-            # function tools are forwarded
+            # function tools are forwarded, and refusing one is a routing
+            # decision too, so it is recorded the same way
             server_tools = non_function_tools(body)
             if server_tools:
+                refused = invalid_request_event(
+                    alias_name=alias_name,
+                    mode=alias.mode,
+                    identity=context.name if context else None,
+                    config_version=document.version,
+                    config_checksum=document.checksum,
+                )
+                telemetry.emit(refused)
                 return JSONResponse(
                     status_code=400,
                     content={
                         "error": {
                             "message": f"Only function tools are accepted; got {', '.join(sorted(set(server_tools)))}",
                             "reason": "unsupported_tool",
+                            "request_id": refused.request_id,
                         }
                     },
                 )

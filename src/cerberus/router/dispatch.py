@@ -162,6 +162,33 @@ def unauthorized_event(
     )
 
 
+def invalid_request_event(
+    *,
+    alias_name: str,
+    mode: str,
+    identity: str | None,
+    config_version: str | None = None,
+    config_checksum: str | None = None,
+) -> RoutingEvent:
+    """A request refused for its own content (400) before any upstream call."""
+    return _event(
+        request_id=str(uuid.uuid4()),
+        alias=alias_name,
+        mode=mode,
+        target=None,
+        attempts=[],
+        http_status=400,
+        outcome="invalid_request",
+        started_at=time.perf_counter(),
+        usage=None,
+        streaming=False,
+        fallback=False,
+        identity=identity,
+        config_version=config_version,
+        config_checksum=config_checksum,
+    )
+
+
 def shadow_decision_event(
     *,
     document: ConfigDocument,
