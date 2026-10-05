@@ -44,6 +44,7 @@ from cerberus.identity import (
     resolve_identity,
     supplied_credential,
 )
+from cerberus.caller_fields import non_function_tools
 from cerberus.fusion import FusionBackend, OpenRouterFusionBackend, fusion_dispatch, fusion_status
 from cerberus.identity.session_store import InMemorySessionStore, SqliteSessionStore
 from cerberus.identity.sso import AdminSSO
@@ -933,6 +934,20 @@ def create_app(
                         status_code=403,
                         content={"error": {"message": f"Identity not authorized for {alias_name!r}", "reason": denial}},
                     )
+        if alias.mode != "fusion":
+            # fusion rejects caller tools outright (fusion_dispatch); elsewhere
+            # only function tools are forwarded
+            server_tools = non_function_tools(body)
+            if server_tools:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "message": f"Only function tools are accepted; got {', '.join(sorted(set(server_tools)))}",
+                            "reason": "unsupported_tool",
+                        }
+                    },
+                )
         shadow = lifecycle.shadow
         if shadow is not None:
             shadow_event = shadow_decision_event(

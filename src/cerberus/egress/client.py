@@ -11,10 +11,10 @@ from typing import Any
 
 import httpx
 
+from cerberus.caller_fields import caller_body
 from cerberus.router.engine import Target
 
 RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
-
 
 def retry_after_seconds(response: httpx.Response) -> float | None:
     value = response.headers.get("retry-after")
@@ -94,7 +94,7 @@ class StreamingUsageCollector:
 def build_upstream_request(
     client: httpx.AsyncClient, target: Target, body: dict[str, Any], api_key: str
 ) -> httpx.Request:
-    upstream_body = {**body, "model": target.model}
+    upstream_body = {**caller_body(body), "model": target.model}
     # Optional per-candidate reasoning budget. Absent -> nothing is added and the
     # body is exactly what it was before this feature existed. Present -> injected
     # only when the caller did not state one, unless the route explicitly claims
