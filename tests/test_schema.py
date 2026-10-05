@@ -470,3 +470,17 @@ def test_jev_input_policy_is_a_closed_vocabulary():
     raw = _jev_native_raw(jev={"decider": {"provider": "openrouter", "credential": "primary"}, "input": "everything"})
     with pytest.raises(ValidationError):
         CerberusConfig.model_validate(raw)
+
+
+def test_jev_reasoning_efforts_need_a_choice_and_a_route_to_apply_to():
+    raw = _jev_native_raw()
+    policy = raw["aliases"]["cerberus/smart"]["jev"]
+    policy["reasoning_efforts"] = ["low", "high"]
+    with pytest.raises(ValidationError, match="would never be applied"):
+        CerberusConfig.model_validate(raw)
+    raw["aliases"]["cerberus/smart"]["candidates"][0]["reasoning_effort"] = "low"
+    assert CerberusConfig.model_validate(raw).aliases["cerberus/smart"].jev.reasoning_efforts == ["low", "high"]
+    for bad, message in ((["low"], "at least two"), (["low", "low"], "twice"), (["low", "extreme"], "literal_error")):
+        policy["reasoning_efforts"] = bad
+        with pytest.raises(ValidationError, match=message):
+            CerberusConfig.model_validate(raw)

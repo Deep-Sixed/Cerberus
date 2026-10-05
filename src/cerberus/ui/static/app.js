@@ -817,6 +817,8 @@ function jevPool(entry) {
       el("h3", { text: "Decider" }),
       el("div", { class: "card-row" }, el("span", { text: "model" }), codeText(d.model)),
       el("div", { class: "card-row" }, el("span", { text: "reads" }), codeText(d.input.replace(/_/g, " "))),
+      el("div", { class: "card-row" }, el("span", { text: "reasoning effort" }),
+        codeText(d.reasoning_efforts ? "Jev chooses: " + d.reasoning_efforts.join(", ") : "configured")),
       el("div", { class: "card-row" }, el("span", { text: "backend configured" }), yes(ready.backend_present)),
       el("div", { class: "card-row" }, el("span", { text: "credential present" }), yes(ready.credential_present)),
       el("div", { class: "card-row" }, el("span", { text: "can decide now" }), yes(ready.decides)),

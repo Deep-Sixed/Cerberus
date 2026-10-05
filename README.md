@@ -111,6 +111,9 @@ that model first through its own failover loop, the rest in configured order.
   silently change routing.
 - If no usable decision comes back, the request runs in configured order; a
   decision outage never takes the alias down.
+- Optionally (`jev.reasoning_efforts`), the same call also asks how much
+  reasoning effort the request needs; the answer replaces the effort of pool
+  candidates that already set one, and a caller's own effort still wins.
 - Streams, fails over and cools down like any dispatch alias.
 
 ## Dispatch

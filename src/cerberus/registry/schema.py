@@ -28,6 +28,7 @@ JevInput = Literal["last_user_message", "full_conversation", "metadata"]
 ModelStrength = Literal["basic", "standard", "strong", "frontier"]
 # Distinct models one decision may choose between; bounds the decision input.
 JEV_MAX_OPTIONS = 64
+ReasoningEffort = Literal["minimal", "low", "medium", "high"]
 
 ALIAS_PREFIX = "cerberus/"
 VERSION_PATTERN = r"^cerberus-\d{4}-\d{2}-\d{2}\.\d+$"
@@ -201,7 +202,7 @@ class Candidate(BaseModel):
     # reported none at ~1.5s. Google bills thinking as output, so this is a real
     # cost and latency lever — but a single observation must not be generalised
     # to a whole corpus.
-    reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
+    reasoning_effort: ReasoningEffort | None = None
     # A caller that sets reasoning_effort itself keeps it unless the route
     # explicitly claims precedence. Silently overwriting a caller's stated
     # reasoning budget would hide the substitution from whoever asked for it.
@@ -322,11 +323,27 @@ class JevPolicy(BaseModel):
     # order. Generation keeps the provider's own timeouts.
     timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     allow_paid_pool: bool = False
+    # When set, the same decision also asks Jev how much reasoning effort the
+    # request needs, choosing only among these values. The answer replaces the
+    # configured reasoning_effort of a pool candidate that sets one, and of no
+    # other: a route without one may not accept the parameter at all, and a
+    # value outside this list may be one a route rejects. A caller's own stated
+    # effort still wins unless the candidate sets reasoning_effort_override.
+    # Absent means the question is never asked.
+    reasoning_efforts: list[ReasoningEffort] | None = None
 
     @model_validator(mode="after")
     def validate_endpoint(self) -> "JevPolicy":
         if self.endpoint.scheme != "https":
             raise ValueError("jev endpoint must use https: the decision input carries request text")
+        if self.reasoning_efforts is not None:
+            if len(set(self.reasoning_efforts)) != len(self.reasoning_efforts):
+                raise ValueError("jev.reasoning_efforts lists a value twice")
+            if len(self.reasoning_efforts) < 2:
+                raise ValueError(
+                    "jev.reasoning_efforts needs at least two values to choose between; "
+                    "set reasoning_effort on the candidates instead"
+                )
         return self
 
 
@@ -491,6 +508,15 @@ class CerberusConfig(BaseModel):
                 )
         if not policy.allow_paid_pool and any(tier == "paid" for tier in tiers):
             raise ValueError(f"alias {alias_name!r}: paid jev pool member requires allow_paid_pool")
+        if policy.reasoning_efforts is not None and not any(
+            candidate.reasoning_effort is not None for candidate in alias.candidates
+        ):
+            # the answer only ever replaces a configured effort, so with none
+            # configured it would be asked for and never applied
+            raise ValueError(
+                f"alias {alias_name!r}: jev.reasoning_efforts is set but no pool candidate sets "
+                f"reasoning_effort, so Jev's answer would never be applied"
+            )
 
     @model_validator(mode="after")
     def validate_references(self) -> "CerberusConfig":
