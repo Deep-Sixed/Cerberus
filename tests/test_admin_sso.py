@@ -229,3 +229,35 @@ async def test_docs_and_openapi_follow_the_admin_boundary(monkeypatch, tmp_path)
             # and the schema is real, not a stub
             schema = await client.get("/openapi.json", headers={"authorization": f"Bearer {break_glass()}"})
             assert "/v1/chat/completions" in schema.json()["paths"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_kids_do_not_hammer_the_jwks_endpoint(monkeypatch, tmp_path):
+    """A bearer with a made-up kid on any /admin/* request must not buy an
+    outbound JWKS fetch each time; refreshes are rate-limited."""
+
+    monkeypatch.setenv("ALPHA_KEY", "alpha-secret")
+    monkeypatch.setenv("CB_OIDC_ID", "cerberus")
+    monkeypatch.setenv("CB_OIDC_SECRET", "shh")
+    monkeypatch.setenv("CB_SESSION_SECRET", "session-signing-secret")
+    raw = raw_config("cerberus-2026-07-16.1")
+    raw["server"] = {"host": "127.0.0.1", "port": 4000}
+    raw["admin_sso"] = sso_block()
+    doc = load_config_document(write_config(tmp_path, "v.yaml", raw))
+    fetches = []
+
+    def sso_handler(request: httpx.Request) -> httpx.Response:
+        fetches.append(request.url.path)
+        return httpx.Response(200, json={"keys": [_JWK]})
+
+    app = create_app(
+        doc, http_transport=httpx.MockTransport(ok_upstream), sso_transport=httpx.MockTransport(sso_handler)
+    )
+    forged = jwt.encode({"sub": "x"}, _KEY, algorithm="RS256", headers={"kid": "unknown-kid"})
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app, client=("203.0.113.9", 40001))
+        async with httpx.AsyncClient(transport=transport, base_url="http://cerberus.example") as client:
+            for _ in range(20):
+                response = await client.get("/admin/status", headers={"authorization": f"Bearer {forged}"})
+                assert response.status_code == 401
+    assert len(fetches) == 1

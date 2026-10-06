@@ -33,6 +33,11 @@ class AdminSession:
 # nonce, verifier, expires — the PKCE/replay material stashed between login start and callback
 Pending = tuple[str, str, float]
 
+# /admin/login/start is unauthenticated and each call stores a pending row that
+# lives for the login TTL. Past this many, the soonest-expiring rows are evicted
+# so a request loop cannot grow memory or the state file without bound.
+MAX_PENDING = 10_000
+
 
 class SessionStore(Protocol):
     def put_pending(self, state: str, nonce: str, verifier: str, expires: float) -> None: ...
@@ -51,6 +56,10 @@ class InMemorySessionStore:
         self._sessions: dict[str, AdminSession] = {}
 
     def put_pending(self, state: str, nonce: str, verifier: str, expires: float) -> None:
+        current = time.time()
+        self._pending = {s: v for s, v in self._pending.items() if v[2] > current}  # gc
+        while len(self._pending) >= MAX_PENDING:
+            del self._pending[min(self._pending, key=lambda s: self._pending[s][2])]
         self._pending[state] = (nonce, verifier, expires)
 
     def pop_pending(self, state: str, *, now: float | None = None) -> Pending | None:
@@ -120,6 +129,12 @@ class SqliteSessionStore:
                 " ON CONFLICT(state) DO UPDATE SET nonce=excluded.nonce,"
                 " verifier=excluded.verifier, expires=excluded.expires",
                 (state, nonce, verifier, expires),
+            )
+            self._connection.execute("DELETE FROM oidc_pending WHERE expires <= ?", (time.time(),))  # gc
+            self._connection.execute(
+                "DELETE FROM oidc_pending WHERE state IN (SELECT state FROM oidc_pending"
+                " ORDER BY expires DESC LIMIT -1 OFFSET ?)",
+                (MAX_PENDING,),
             )
             self._connection.commit()
 
