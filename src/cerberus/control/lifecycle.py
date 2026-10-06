@@ -40,6 +40,12 @@ class ConfigLifecycle:
     def shadow(self) -> ConfigDocument | None:
         return self._shadow
 
+    @property
+    def known_versions(self) -> frozenset[str]:
+        """Every version bound to a checksum, active or not."""
+
+        return frozenset(self._version_checksums)
+
     def validate(self, path: str) -> ConfigDocument:
         """Validate and permanently bind a version to its first observed checksum."""
 

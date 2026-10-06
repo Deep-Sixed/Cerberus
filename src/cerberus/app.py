@@ -574,7 +574,9 @@ def create_app(
                 },
             )
         try:
-            candidate = apply_updates(lifecycle.active.config, updates)
+            candidate = apply_updates(
+                lifecycle.active.config, updates, taken_versions=lifecycle.known_versions
+            )
         except ValueError as exc:
             return JSONResponse(status_code=422, content={"staged": False, "error": str(exc)})
         except ValidationError as exc:
