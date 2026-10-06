@@ -127,12 +127,12 @@ latency, status and usage. It never carries request text.
 The request follows OpenRouter's published Decisions API reference: `questions`
 is a record keyed by question id, and each `choice` question carries
 `instructions` and `criteria`, a record of the offered options (with no guidance
-of their own; the state describes each model). The live validator rejects a list
-of questions and accepts this form. A choice answer is documented as `choice`,
+of their own; the state describes each model). A choice answer carries `choice`,
 `confidence` and per-option `probabilities`; the record keeps the probability of
-the option chosen. Until a live call confirms the answer, it is read tolerantly,
-and a misread degrades to configured order rather than to an unvetted model.
-`scripts/probe-jev-decisions.py` settles it against a live
+the option chosen. A live call to `typesafe/jev-1.13-20260917` confirmed both
+shapes. The answer is still read tolerantly, so a future change to it degrades
+to configured order rather than to an unvetted model.
+`scripts/probe-jev-decisions.py` checks this again against a live
 endpoint: it sends one synthetic decision through the production adapter and
 reports whether the request was accepted and each answer read as an offered
 option.
