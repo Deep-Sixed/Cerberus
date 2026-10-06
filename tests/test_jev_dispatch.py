@@ -103,8 +103,8 @@ def answer(payload, status=200):
 
 def chooses(option, probability=0.91):
     return answer({
-        "answers": {"route": {"type": "choice", "choice": option, "probabilities": {option: probability}}},
-        "usage": {"prompt_tokens": 120, "completion_tokens": 1, "total_tokens": 121, "cost": 0.00004},
+        "answers": {"route": {"type": "choice", "choice": option, "confidence": 0.6, "probabilities": {option: probability}}},
+        "usage": {"input_tokens": 120, "output_tokens": 1, "cost": 0.00004},
     })
 
 
@@ -169,13 +169,12 @@ async def test_the_decision_is_one_decisions_api_call_with_the_pinned_model(monk
     assert req.headers["authorization"] == "Bearer jev-key", "the decider's own credential"
     body = decisions.body
     assert body["model"] == "typesafe/jev-1.13"
-    assert body["questions"] == [{
-        "id": "route",
+    assert body["questions"] == {"route": {
         "type": "choice",
-        "question": "Which candidate model is the least costly one that is still strong enough "
-                    "to handle this request well?",
-        "options": ["m1", "m2", "m3"],
-    }]
+        "instructions": "Which candidate model is the least costly one that is still strong enough "
+                        "to handle this request well?",
+        "criteria": {"m1": None, "m2": None, "m3": None},
+    }}
     assert set(body) == {"model", "state", "questions"}
 
 
@@ -249,7 +248,7 @@ async def test_the_chosen_model_runs_first_through_cerberus(monkeypatch, tmp_pat
         "effort_reason": "not_requested",
         "latency_ms": event["jev"]["latency_ms"],
         "http_status": 200,
-        "usage": {"prompt_tokens": 120, "completion_tokens": 1, "total_tokens": 121, "cost": 0.00004},
+        "usage": {"input_tokens": 120, "output_tokens": 1, "cost": 0.00004},
     }
 
 
@@ -363,7 +362,7 @@ async def test_a_cooled_down_model_is_never_offered(monkeypatch, tmp_path):
     app.state.cooldowns.apply(scope="model", provider="openrouter", credential="main", model="vendor/mid",
                               reason="quota_429", duration_seconds=600)
     await call(app)
-    assert decisions.body["questions"][0]["options"] == ["m1", "m2"]
+    assert list(decisions.body["questions"]["route"]["criteria"]) == ["m1", "m2"]
     assert "vendor/mid" not in decisions.body["state"]
     assert "m2: model anthropic/claude-sonnet" in decisions.body["state"]
 
@@ -456,16 +455,19 @@ def test_decider_builds_the_documented_body():
     assert body == {
         "model": "typesafe/jev-1.13",
         "state": "s",
-        "questions": [
-            {"id": "route", "type": "choice", "question": "q?", "options": ["m1", "m2"]},
-            {"id": "effort", "type": "choice", "question": "e?", "options": ["low", "high"]},
-        ],
+        "questions": {
+            "route": {"type": "choice", "instructions": "q?", "criteria": {"m1": None, "m2": None}},
+            "effort": {"type": "choice", "instructions": "e?", "criteria": {"low": None, "high": None}},
+        },
     }
 
 
 @pytest.mark.parametrize(
     ("answers", "expected"),
     [
+        # the documented shape: confidence summarizes the spread; the record keeps the choice's probability
+        ({"route": {"type": "choice", "choice": "m2", "confidence": 0.6, "probabilities": {"m1": 0.2, "m2": 0.8}}},
+         ("m2", 0.8)),
         ({"route": {"choice": "m2", "probabilities": {"m1": 0.2, "m2": 0.8}}}, ("m2", 0.8)),
         ({"route": {"result": "m1"}}, ("m1", None)),
         ({"route": {"value": "m1", "confidence": 0.7}}, ("m1", 0.7)),
@@ -521,7 +523,7 @@ def decides(route="m3", effort="high"):
         answers["route"] = {"choice": route, "probabilities": {route: 0.8}}
     if effort is not None:
         answers["effort"] = {"choice": effort, "probabilities": {effort: 0.7}}
-    return answer({"answers": answers, "usage": {"total_tokens": 130}})
+    return answer({"answers": answers, "usage": {"input_tokens": 130, "output_tokens": 2}})
 
 
 def sent_effort(upstream, index=0):
@@ -534,12 +536,11 @@ async def test_effort_is_a_second_question_in_the_same_call(monkeypatch, tmp_pat
     await call(app)
 
     assert len(decisions.requests) == 1
-    assert [q["id"] for q in decisions.body["questions"]] == ["route", "effort"]
-    assert decisions.body["questions"][1] == {
-        "id": "effort",
+    assert list(decisions.body["questions"]) == ["route", "effort"]
+    assert decisions.body["questions"]["effort"] == {
         "type": "choice",
-        "question": "How much reasoning effort should the chosen model spend on this request?",
-        "options": EFFORTS,
+        "instructions": "How much reasoning effort should the chosen model spend on this request?",
+        "criteria": dict.fromkeys(EFFORTS),
     }
 
 
@@ -599,7 +600,7 @@ async def test_effort_alone_is_asked_when_one_model_is_left(monkeypatch, tmp_pat
                               reason="quota_429", duration_seconds=600)
     _, events = await call(app)
 
-    assert [q["id"] for q in decisions.body["questions"]] == ["effort"]
+    assert list(decisions.body["questions"]) == ["effort"]
     assert upstream.models() == ["anthropic/claude-sonnet"] and sent_effort(upstream) == "low"
     record = events[0]["jev"]
     assert (record["decision"], record["reason"], record["effort"]) == ("skipped", "single_option", "low")
@@ -611,7 +612,7 @@ async def test_effort_is_not_asked_when_no_attemptable_route_sets_one(monkeypatc
     app.state.cooldowns.apply(scope="model", provider="openrouter", credential="main",
                               model="anthropic/claude-sonnet", reason="quota_429", duration_seconds=600)
     _, events = await call(app)
-    assert [q["id"] for q in decisions.body["questions"]] == ["route"]
+    assert list(decisions.body["questions"]) == ["route"]
     assert events[0]["jev"]["effort_reason"] == "not_applicable"
 
 

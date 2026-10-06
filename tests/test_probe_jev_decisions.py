@@ -6,6 +6,7 @@ reports each outcome truthfully, sends nothing from a real configuration, and
 never prints the key.
 """
 
+import gzip
 import importlib.util
 import json
 import sys
@@ -38,10 +39,10 @@ def transport(status=200, payload=None, content=None, capture=None):
 def answered(route="m1", effort="low"):
     return {
         "answers": {
-            "route": {"choice": route, "probabilities": {route: 0.84}},
-            "effort": {"choice": effort, "probabilities": {effort: 0.66}},
+            "route": {"type": "choice", "choice": route, "confidence": 0.7, "probabilities": {route: 0.84}},
+            "effort": {"type": "choice", "choice": effort, "confidence": 0.5, "probabilities": {effort: 0.66}},
         },
-        "usage": {"prompt_tokens": 210, "completion_tokens": 2, "total_tokens": 212},
+        "usage": {"input_tokens": 210, "output_tokens": 2, "cost": 0.0000088},
     }
 
 
@@ -61,9 +62,9 @@ async def test_the_probe_sends_the_production_request_shape():
     body = json.loads(request.content)
     assert body == report.request_body
     assert body["model"] == "typesafe/jev-1.13"
-    assert [q["id"] for q in body["questions"]] == ["route", "effort"]
-    assert body["questions"][0]["options"] == ["m1", "m2", "m3"]
-    assert body["questions"][1]["options"] == ["low", "medium", "high"]
+    assert list(body["questions"]) == ["route", "effort"]
+    assert body["questions"]["route"]["criteria"] == {"m1": None, "m2": None, "m3": None}
+    assert body["questions"]["effort"]["criteria"] == {"low": None, "medium": None, "high": None}
     # synthetic state only: the probe's own made-up pool and prompt
     assert "probe/small-local" in body["state"] and probe.DEFAULT_PROMPT in body["state"]
 
@@ -74,7 +75,7 @@ async def test_an_accepted_request_with_readable_answers_passes():
     assert report.ok
     assert report.answers["route"] == {"choice": "m3", "confidence": 0.84, "offered": True}
     assert report.answers["effort"] == {"choice": "high", "confidence": 0.66, "offered": True}
-    assert report.usage == {"prompt_tokens": 210, "completion_tokens": 2, "total_tokens": 212}
+    assert report.usage == {"input_tokens": 210, "output_tokens": 2, "cost": 0.0000088}
     assert probe.verdict(report).startswith("OK")
 
 
@@ -82,19 +83,20 @@ async def test_an_accepted_request_with_readable_answers_passes():
 async def test_no_effort_asks_only_the_route():
     sent = []
     report = await run(transport(payload=answered(), capture=sent), ask_effort=False)
-    assert [q["id"] for q in json.loads(sent[0].content)["questions"]] == ["route"]
+    assert list(json.loads(sent[0].content)["questions"]) == ["route"]
     assert list(report.answers) == ["route"] and report.ok
 
 
 @pytest.mark.parametrize(
     ("t", "start", "status"),
     [
-        (transport(400, {"error": {"message": "questions[0].options: unknown field"}}), "REQUEST REJECTED (HTTP 400)", 400),
+        (transport(400, {"error": {"message": "questions: expected record, received array"}}), "REQUEST REJECTED (HTTP 400)", 400),
+        (transport(403, {"error": {"message": "Key limit exceeded (total limit)."}}), "KEY REFUSED (HTTP 403)", 403),
         (transport(200, content=b"<html>"), "UNREADABLE RESPONSE", 200),
         (transport(200, {"answers": {"route": {"label": "m1"}}}), "ANSWER NOT READ for route, effort", 200),
         (transport(200, answered("anthropic/claude", "extreme")), "ANSWERED OUTSIDE THE OPTIONS", 200),
     ],
-    ids=["rejected", "not-json", "unread", "outside"],
+    ids=["rejected", "key-refused", "not-json", "unread", "outside"],
 )
 @pytest.mark.asyncio
 async def test_each_failure_is_reported_as_what_it_is(t, start, status):
@@ -102,6 +104,17 @@ async def test_each_failure_is_reported_as_what_it_is(t, start, status):
     assert not report.ok
     assert report.status == status
     assert probe.verdict(report).startswith(start)
+
+
+@pytest.mark.asyncio
+async def test_a_compressed_response_is_reported_as_what_it_is():
+    error = gzip.compress(json.dumps({"error": {"message": "Key limit exceeded (total limit)."}}).encode())
+    report = await run(httpx.MockTransport(
+        lambda _request: httpx.Response(403, content=error, headers={"content-encoding": "gzip"})
+    ))
+    assert (report.status, report.failure) == (403, "http_error")
+    assert report.raw == {"error": {"message": "Key limit exceeded (total limit)."}}
+    assert probe.verdict(report).startswith("KEY REFUSED (HTTP 403)")
 
 
 @pytest.mark.asyncio
