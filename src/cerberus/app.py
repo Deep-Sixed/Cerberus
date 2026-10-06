@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -55,6 +56,8 @@ from cerberus.registry.schema import Alias, Candidate
 from cerberus.router.dispatch import dispatch, shadow_decision_event, unauthorized_event
 from cerberus.state import InMemoryCooldownStore, SqliteCooldownStore
 from cerberus.telemetry import TelemetryEmitter
+
+logger = logging.getLogger(__name__)
 
 SESSION_COOKIE = "cerberus_admin_session"
 
@@ -177,7 +180,22 @@ def create_app(
     state_path = document.config.state.path
     control_plane = SqliteControlPlane(state_path) if state_path else None
     lifecycle = ConfigLifecycle(document, repository=control_plane)
-    boot_config = lifecycle.active.config  # infrastructure bindings: fixed at boot
+    # Infrastructure bindings (auth tokens, SSO, authentik, telemetry, docs,
+    # candidate roots) come from the document this process was started with —
+    # the same document cli.py takes the listen host and port from. They must
+    # never come from a revision restored out of SQLite: that revision may
+    # predate an operator's edit to the boot file, so the process would bind the
+    # file's host (say 0.0.0.0) while enforcing the old revision's auth (say no
+    # api token). Routing policy still follows the restored active revision.
+    boot_config = document.config
+    if lifecycle.active.checksum != document.checksum:
+        logger.warning(
+            "Boot configuration %s differs from the restored active revision %s; "
+            "server, auth, SSO and telemetry bindings follow the boot file, routing "
+            "policy follows the active revision until the boot file is activated",
+            document.version,
+            lifecycle.active.version,
+        )
     store = SqliteCooldownStore(state_path) if state_path else InMemoryCooldownStore()
     # staged candidate configs from the browser editor land here — the same
     # writable volume as the state DB in production; a tmp fallback keeps
@@ -513,7 +531,7 @@ def create_app(
             # SPEC §8: fusion status on the dashboard. "configured" means every
             # fusion alias's backend credential is present; this read-only
             # endpoint never probes the backend.
-            "fusion": fusion_status(boot_config),
+            "fusion": fusion_status(lifecycle.active.config),
         }
 
     @app.get("/admin/health", response_model=None)

@@ -42,5 +42,8 @@ Back up with SQLite's online-backup mechanism or stop the service and capture a
 consistent database/WAL set. Do not copy only the main file during active WAL
 writes. Keep authoring files and secret-manager recovery separately. The active
 revision and materialized catalog are restored from SQLite; the in-process
-rollback stack is not. Treat restored session material as sensitive and consider
+rollback stack is not. Server, authentication, SSO, authentik and telemetry
+bindings always come from the boot file, not the restored revision, so a restart
+never pairs the file's listen address with an older revision's credentials; a boot
+file that differs from the restored revision is logged at startup. Treat restored session material as sensitive and consider
 invalidating sessions after recovery.
