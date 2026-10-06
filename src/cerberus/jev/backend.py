@@ -5,18 +5,18 @@ this request and, when its policy says so, how much reasoning effort the request
 needs — and gets back, per question, one of the options it offered or nothing
 usable. Nothing outside this module knows the wire shape of a decision service.
 
-Contract for OpenRouter's Decisions API, from its published reference: ``POST
+Contract for OpenRouter's Decisions API, from its published reference and
+confirmed by a live call to ``typesafe/jev-1.13-20260917``: ``POST
 /api/alpha/decisions`` with a bearer key; the body carries ``model``, ``state``
 and ``questions``, a record keyed by question id. A ``choice`` question is
 ``{type, instructions, criteria}``, where ``criteria`` maps each option to its
-guidance or ``null``; the live validator rejects a list of questions and
-accepts this form. The response carries ``answers`` keyed by question id — a
-choice answer is ``{type, choice, confidence?, probabilities?}`` — and ``usage``
+guidance or ``null``. The response carries ``answers`` keyed by question id — a
+choice answer is ``{type, choice, confidence, probabilities}`` — and ``usage``
 with ``input_tokens``, ``output_tokens`` and ``cost``. The answer is still read
-tolerantly until a live call confirms it. A misread can only ever produce "no
-usable answer", because each choice must equal an option Cerberus sent; the
-request then runs in configured order and configured effort, which policy
-already allows.
+tolerantly, so a future change to it degrades rather than breaks: a misread can
+only ever produce "no usable answer", because each choice must equal an option
+Cerberus sent; the request then runs in configured order and configured effort,
+which policy already allows.
 """
 
 from __future__ import annotations
