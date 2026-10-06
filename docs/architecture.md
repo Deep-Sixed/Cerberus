@@ -128,7 +128,10 @@ The confirmed Decisions API contract covers the endpoint, the model, the
 `model`/`state`/`questions` request and `answers` keyed by question id; the
 fields inside one question and one answer are not yet confirmed, so the answer
 is read tolerantly and a misread degrades to configured order rather than to an
-unvetted model.
+unvetted model. `scripts/probe-jev-decisions.py` settles it against a live
+endpoint: it sends one synthetic decision through the production adapter and
+reports whether the request was accepted and each answer read as an offered
+option.
 
 ## Dispatch control plane
 
