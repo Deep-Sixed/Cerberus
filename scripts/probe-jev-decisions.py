@@ -96,9 +96,10 @@ class _Recording(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         response = await self._inner.handle_async_request(request)
-        content = await response.aread()
+        content = await response.aread()  # decoded, so its encoding headers no longer apply
         self.status, self.body = response.status_code, content
-        return httpx.Response(response.status_code, headers=response.headers, content=content, request=request)
+        headers = [(k, v) for k, v in response.headers.multi_items() if k not in ("content-encoding", "content-length")]
+        return httpx.Response(response.status_code, headers=headers, content=content, request=request)
 
     async def aclose(self) -> None:
         await self._inner.aclose()
@@ -197,6 +198,11 @@ def render(report: Report, *, endpoint: str, model: str) -> str:
 def verdict(report: Report) -> str:
     if report.ok:
         return "OK. The request is accepted and every answer reads as an offered option."
+    if report.failure == "http_error" and report.status in (401, 402, 403):
+        return (
+            f"KEY REFUSED (HTTP {report.status}). OpenRouter refused the key or its credit before Jev answered; "
+            "the error above says which. Use a key with a credit limit above zero and retry."
+        )
     if report.failure == "http_error":
         return (
             f"REQUEST REJECTED (HTTP {report.status}). Compare the error body with the request body; "

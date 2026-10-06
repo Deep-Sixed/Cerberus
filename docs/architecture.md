@@ -124,11 +124,15 @@ Each routing event carries a `jev` record: options offered, whether the decision
 was `chosen`, `skipped` or a `fallback`, the reason, the choice and its
 probability, the effort applied with its probability or why none was, decision
 latency, status and usage. It never carries request text.
-The confirmed Decisions API contract covers the endpoint, the model, the
-`model`/`state`/`questions` request and `answers` keyed by question id; the
-fields inside one question and one answer are not yet confirmed, so the answer
-is read tolerantly and a misread degrades to configured order rather than to an
-unvetted model. `scripts/probe-jev-decisions.py` settles it against a live
+The request follows OpenRouter's published Decisions API reference: `questions`
+is a record keyed by question id, and each `choice` question carries
+`instructions` and `criteria`, a record of the offered options (with no guidance
+of their own; the state describes each model). The live validator rejects a list
+of questions and accepts this form. A choice answer is documented as `choice`,
+`confidence` and per-option `probabilities`; the record keeps the probability of
+the option chosen. Until a live call confirms the answer, it is read tolerantly,
+and a misread degrades to configured order rather than to an unvetted model.
+`scripts/probe-jev-decisions.py` settles it against a live
 endpoint: it sends one synthetic decision through the production adapter and
 reports whether the request was accepted and each answer read as an offered
 option.

@@ -119,7 +119,8 @@ that model first through its own failover loop, the rest in configured order.
 To check a real Decisions API against what a jev alias sends, run the live
 probe. It sends one synthetic decision through Cerberus's own adapter, prints
 the raw response beside what Cerberus read from it, and exits non-zero when the
-request is rejected or an answer cannot be read (one decision call is billed):
+request is rejected or an answer cannot be read (one decision call is billed, so
+the key needs a credit limit above zero):
 
 ```sh
 OPENROUTER_API_KEY=... uv run --frozen python scripts/probe-jev-decisions.py

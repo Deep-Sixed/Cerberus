@@ -5,15 +5,18 @@ this request and, when its policy says so, how much reasoning effort the request
 needs — and gets back, per question, one of the options it offered or nothing
 usable. Nothing outside this module knows the wire shape of a decision service.
 
-Confirmed contract for OpenRouter's Decisions API: ``POST /api/alpha/decisions``
-with a bearer key; the body carries ``model``, ``state`` and ``questions``;
-Jev answers ``choice``, ``noul`` and ``score`` questions; the response carries
-``answers`` keyed by question id, with typed results and probabilities, and
-``usage``. The field names inside one question and one answer are not yet
-confirmed, so the request uses the plainest form and the answer is read
-tolerantly. A misread can only ever produce "no usable answer", because each
-choice must equal an option Cerberus sent; the request then runs in configured
-order and configured effort, which policy already allows.
+Contract for OpenRouter's Decisions API, from its published reference: ``POST
+/api/alpha/decisions`` with a bearer key; the body carries ``model``, ``state``
+and ``questions``, a record keyed by question id. A ``choice`` question is
+``{type, instructions, criteria}``, where ``criteria`` maps each option to its
+guidance or ``null``; the live validator rejects a list of questions and
+accepts this form. The response carries ``answers`` keyed by question id — a
+choice answer is ``{type, choice, confidence?, probabilities?}`` — and ``usage``
+with ``input_tokens``, ``output_tokens`` and ``cost``. The answer is still read
+tolerantly until a live call confirms it. A misread can only ever produce "no
+usable answer", because each choice must equal an option Cerberus sent; the
+request then runs in configured order and configured effort, which policy
+already allows.
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ EFFORT_QUESTION_ID = "effort"
 EFFORT_QUESTION = "How much reasoning effort should the chosen model spend on this request?"
 # keys an answer's chosen option may sit under, most specific first
 _CHOICE_KEYS = ("choice", "result", "value", "answer", "selected")
-_USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "cost")
+_USAGE_KEYS = ("input_tokens", "output_tokens", "cost")
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,13 +100,14 @@ class OpenRouterJevDecider:
 
     @staticmethod
     def build_body(request: DecisionRequest) -> dict[str, Any]:
+        # an option needs no guidance of its own: the state already describes each one
         return {
             "model": request.model,
             "state": request.state,
-            "questions": [
-                {"id": q.id, "type": "choice", "question": q.question, "options": list(q.options)}
+            "questions": {
+                q.id: {"type": "choice", "instructions": q.question, "criteria": dict.fromkeys(q.options)}
                 for q in request.questions
-            ],
+            },
         }
 
     async def decide(self, request: DecisionRequest) -> Decision:
