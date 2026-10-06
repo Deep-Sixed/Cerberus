@@ -40,7 +40,7 @@ def build_app(tmp_path, **server):
 async def post(app, url, body):
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             return await client.post(url, json=body, headers=CSRF)
 
 
@@ -131,7 +131,7 @@ async def test_staged_candidate_round_trips_through_validate_and_activate(tmp_pa
     app = build_app(tmp_path)
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             staged = await client.post(
                 "/admin/config/stage",
                 json={"updates": {"providers.alpha.quota_cooldown_seconds": 1234}},
@@ -247,7 +247,7 @@ async def test_version_checksum_collision_keeps_its_cerberus_message(tmp_path):
 
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await client.post("/admin/validate", json={"path": first}, headers=CSRF)
             clash = await client.post("/admin/validate", json={"path": collision}, headers=CSRF)
 

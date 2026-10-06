@@ -79,6 +79,27 @@ def _release_id() -> str:
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
+
+def _host_name(header: str) -> str:
+    """The hostname from a Host header, lowercased, without port or brackets."""
+
+    value = header.strip().lower()
+    if value.startswith("["):
+        return value[1:].split("]", 1)[0]
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def is_local_host_header(header: str | None, trusted: frozenset[str] = frozenset()) -> bool:
+    """Whether a Host header names this machine (or an operator-trusted name)."""
+
+    if not header:
+        return False
+    name = _host_name(header)
+    if name in _LOOPBACK_HOSTS or name in trusted or name.endswith(".localhost"):
+        return True
+    parts = name.split(".")
+    return len(parts) == 4 and parts[0] == "127" and all(p.isdigit() and int(p) < 256 for p in parts)
+
 # The audit read is bounded: the table is lifetime history and a console asking
 # for all of it would grow without limit. No cursor yet — a bounded newest-first
 # window is what the screen needs, and pagination can be designed when something
@@ -296,11 +317,17 @@ def create_app(
             # non-ASCII header input is a bad credential, never a server error
             return False
 
+    trusted_hosts = frozenset(name.lower() for name in boot_config.server.trusted_hosts)
+
+    def local_host(request: Request) -> bool:
+        return is_local_host_header(request.headers.get("host"), trusted_hosts)
+
     def authenticated(request: Request) -> bool:
-        """Inference-surface gate: the api token, or open when none is configured."""
+        """Inference-surface gate: the api token, or open to local clients when none
+        is configured (the schema only allows that on a loopback bind)."""
 
         if boot_config.server.api_token_env is None:
-            return True
+            return local_host(request)
         return token_matches(boot_config.server.api_token_env, request)
 
     @app.get("/", include_in_schema=False)
@@ -349,8 +376,14 @@ def create_app(
     # -- admin surface (control plane) ------------------------------------
 
     def is_loopback(request: Request) -> bool:
-        # transport peer address only — forwarding headers are client-forgeable
-        return request.client is not None and request.client.host in _LOOPBACK_HOSTS
+        # transport peer address only — forwarding headers are client-forgeable.
+        # The Host must name this machine too: under DNS rebinding a hostile page
+        # in a local browser reaches 127.0.0.1 with its own hostname as Host.
+        return (
+            request.client is not None
+            and request.client.host in _LOOPBACK_HOSTS
+            and local_host(request)
+        )
 
     def admin_denied(request: Request, *, read_only: bool = False) -> JSONResponse | None:
         """Loopback-only or admin-scoped credential (PLAN Session 9).

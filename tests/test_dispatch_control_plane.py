@@ -214,7 +214,7 @@ async def test_health_can_remove_configured_path_and_events_persist(monkeypatch,
     app.state.control_plane.set_provider_health("unconfigured-provider", "healthy")
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             headers = {"authorization": "Bearer identity-secret"}
             body = {"model": "cerberus/coding-fast", "messages": [{"role": "user", "content": "code"}]}
             ok = await client.post("/v1/chat/completions", json=body, headers=headers)
@@ -374,7 +374,7 @@ async def test_probe_transport_failure_records_degraded_not_down(monkeypatch, tm
     app = create_app(doc, http_transport=httpx.MockTransport(flaky))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 40001))
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             probe = await client.post(
                 "/admin/providers/local/test", headers={"x-cerberus-csrf": "1"}
             )

@@ -100,7 +100,7 @@ def build(tmp_path, raw, *, transport, telemetry_transport=None, name="config.ya
 
 def client_for(app):
     return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 40001)), base_url="http://test"
+        transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 40001)), base_url="http://localhost"
     )
 
 

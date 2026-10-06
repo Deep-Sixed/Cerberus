@@ -51,7 +51,7 @@ def make_app(monkeypatch, tmp_path, *, token: str | None = None, admin_token: st
 
 def client_for(app, client_addr):
     return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app, client=client_addr), base_url="http://test"
+        transport=httpx.ASGITransport(app=app, client=client_addr), base_url="http://localhost"
     )
 
 

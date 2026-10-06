@@ -95,7 +95,7 @@ async def test_retryable_status_before_commitment_allows_fallback(monkeypatch, t
     app = create_app(config, http_transport=httpx.MockTransport(upstream))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post(
                 "/v1/chat/completions",
                 json={"model": "cerberus/stream-alias", "messages": [], "stream": True},
@@ -125,7 +125,7 @@ async def test_transport_failure_before_commitment_allows_fallback(monkeypatch, 
     app = create_app(config, http_transport=httpx.MockTransport(upstream))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post(
                 "/v1/chat/completions",
                 json={"model": "cerberus/stream-alias", "messages": [], "stream": True},
@@ -163,7 +163,7 @@ async def test_stream_fails_after_first_chunk_no_provider_switch(monkeypatch, tm
         # With raise_app_exceptions=False, ASGITransport yields the body parts
         # emitted before the mid-stream failure, exactly reflecting what the HTTP client received.
         transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post(
                 "/v1/chat/completions",
                 json={"model": "cerberus/stream-alias", "messages": [], "stream": True},
@@ -193,7 +193,7 @@ async def test_interrupted_stream_closes_upstream(monkeypatch, tmp_path):
 
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             with pytest.raises(RuntimeError, match="controlled mid-stream failure"):
                 async with client.stream(
                     "POST",
@@ -234,7 +234,7 @@ async def test_interrupted_stream_emits_terminal_telemetry(monkeypatch, tmp_path
 
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             with pytest.raises(RuntimeError, match="controlled mid-stream failure"):
                 async with client.stream(
                     "POST",
@@ -298,7 +298,7 @@ async def test_selected_request_remains_tied_to_pinned_configuration_revision(mo
 
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
 
             async def consumer():
                 async with client.stream(

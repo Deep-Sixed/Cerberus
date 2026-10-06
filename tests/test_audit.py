@@ -63,7 +63,7 @@ def build(path):
 
 def client_for(app, addr=LOOPBACK):
     return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app, client=addr), base_url="http://test"
+        transport=httpx.ASGITransport(app=app, client=addr), base_url="http://localhost"
     )
 
 
